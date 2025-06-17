@@ -15,7 +15,7 @@ add_triton_library(TritonLLVMIR
         MLIRLLVMDialect
         MLIRLLVMToLLVMIRTranslation
         MLIRNVVMToLLVMIRTranslation
-        MLIRROCDLToLLVMIRTranslation
+        # MLIRROCDLToLLVMIRTranslation // @EUGO_CHANGE - no ROCM support
         MLIRSCFToControlFlow
         MLIRSupport
         MLIRTargetLLVMIRExport

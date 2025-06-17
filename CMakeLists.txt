@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.20)
 
 if(POLICY CMP0116)
 # Introduced in cmake 3.20
@@ -8,7 +8,8 @@ endif()
 
 include(ExternalProject)
 
-set(CMAKE_CXX_STANDARD 17)
+
+set(CMAKE_CXX_STANDARD 17) # @EUGO_CHANGE: # TODO+ Override their C++ standard to C++23 when migrating to new version
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
@@ -18,12 +19,12 @@ include(CTest)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # Options
-option(TRITON_BUILD_TUTORIALS "Build C++ Triton tutorials" ON)
 option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
 option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
+option(EUGO_TRITON_BUILD_APPS "Build CLI apps from ./bin" OFF)
 
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -71,10 +72,6 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release")
 endif()
 
-if(NOT WIN32)
-  find_library(TERMINFO_LIBRARY tinfo)
-endif()
-
 if(TRITON_BUILD_UT)
   # This is an aggregate target for all unit tests.
   add_custom_target(TritonUnitTests)
@@ -85,7 +82,7 @@ endif()
 # Compiler flags
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(NOT MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++17")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++23") # @EUGO_CHANGE: Override their C++ standard to C++23
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS")
 endif()
@@ -143,7 +140,7 @@ endfunction()
 
 # Disable warnings that show up in external code (gtest;pybind11)
 if(NOT MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wno-covered-switch-default -fvisibility=hidden")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-covered-switch-default -fvisibility=hidden")
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4244 /wd4624 /wd4715 /wd4530")
 endif()
@@ -164,7 +161,7 @@ add_subdirectory(lib)
 # apparently not enough. Currently set linking libstdc++fs for all targets
 # to support some old version GCC compilers like 8.3.0.
 if (NOT WIN32 AND NOT APPLE)
-  link_libraries(stdc++fs)
+  # link_libraries(stdc++fs) # @EUGO_CHANGE - we don't have GCC installed
 endif()
 
 
@@ -191,9 +188,14 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
       # Include the plugin as part of the build, placing the build output under
       # ${TRITON_BINARY_DIR}/third_party/${PLUGIN_NAME}
-      cmake_path(APPEND TRITON_BINARY_DIR "third_party" ${PLUGIN_NAME} OUTPUT_VARIABLE PLUGIN_DIR_BUILD_OUTPUT)
-      message(STATUS "Building plugin '${PLUGIN_NAME}' from ${PLUGIN_DIR} with output ${PLUGIN_DIR_BUILD_OUTPUT}")
-      add_subdirectory(${PLUGIN_DIR} ${PLUGIN_DIR_BUILD_OUTPUT})
+            # @EUGO_CHANGE - we don't build AMD plugin
+      if(NOT PLUGIN_NAME STREQUAL "amd")
+        cmake_path(APPEND TRITON_BINARY_DIR "third_party" ${PLUGIN_NAME} OUTPUT_VARIABLE PLUGIN_DIR_BUILD_OUTPUT)
+        message(STATUS "Building plugin '${PLUGIN_NAME}' from ${PLUGIN_DIR} with output ${PLUGIN_DIR_BUILD_OUTPUT}")
+        add_subdirectory(${PLUGIN_DIR} ${PLUGIN_DIR_BUILD_OUTPUT})
+      else()
+        message(STATUS "Skipping plugin '${PLUGIN_NAME}' as it is 'amd' and we don't build AMD support")
+      endif()
     endforeach()
   endif()
 
@@ -215,7 +217,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     ${triton_plugins}
 
     # mlir
-    MLIRAMDGPUDialect
+    # MLIRAMDGPUDialect # @EUGO_CHANGE - no AMD support
     MLIRNVVMDialect
     MLIRNVVMToLLVMIRTranslation
     MLIRGPUToNVVMTransforms
@@ -230,19 +232,19 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRSupport
     MLIRTargetLLVMIRExport
     MLIRMathToLLVM
-    MLIRROCDLToLLVMIRTranslation
+    # MLIRROCDLToLLVMIRTranslation # @EUGO_CHANGE - no ROCM support
     MLIRGPUDialect
     MLIRSCFToControlFlow
     MLIRIndexToLLVM
-    MLIRGPUToROCDLTransforms
+    # MLIRGPUToROCDLTransforms # @EUGO_CHANGE - no ROCM support
     MLIRUBToLLVM
 
     # LLVM
     LLVMPasses
     LLVMNVPTXCodeGen
     # LLVMNVPTXAsmPrinter
-    LLVMAMDGPUCodeGen
-    LLVMAMDGPUAsmParser
+    # LLVMAMDGPUCodeGen # @EUGO_CHANGE - no AMD support
+    # LLVMAMDGPUAsmParser # @EUGO_CHANGE - no AMD support
 
     Python3::Module
     pybind11::headers
@@ -282,6 +284,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
   add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                   ${PYTHON_SRC_PATH}/ir.cc
+                  ${PYTHON_SRC_PATH}/gluon_ir.cc
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
                   ${PYTHON_SRC_PATH}/llvm.cc)
@@ -296,6 +299,22 @@ if(TRITON_BUILD_PYTHON_MODULE)
     target_link_libraries(triton PRIVATE z)
   endif()
   target_link_options(triton PRIVATE ${LLVM_LDFLAGS})
+
+  # @EUGO_CHANGE - conditionally enable FileCheck for LLVM_SYSPATH (as it's just for testing) and TRITON_WHEEL_DIR
+  if (EUGO_TRITON_BUILD_APPS)
+    if (NOT DEFINED LLVM_SYSPATH)
+        message(FATAL_ERROR "LLVM_SYSPATH must be set.")
+    endif()
+
+    if (NOT DEFINED TRITON_WHEEL_DIR)
+        message(FATAL_ERROR "TRITON_WHEEL_DIR must be set.")
+    endif()
+
+    configure_file(
+        "${LLVM_SYSPATH}/bin/FileCheck"
+        "${TRITON_WHEEL_DIR}/FileCheck"
+        COPYONLY)
+  endif()
 endif()
 
 if (UNIX AND NOT APPLE)
@@ -323,7 +342,15 @@ endif()
 find_package(Threads REQUIRED)
 
 add_subdirectory(third_party/f2reduce)
-add_subdirectory(bin)
+
+# @EUGO_CHANGE - conditionally enable bin directory (not needed for vast majority of things, like pytorch)
+if (EUGO_TRITON_BUILD_APPS)
+  message(STATUS "[EUGO] Adding Triton CLI applications")
+  add_subdirectory(bin)
+else()
+  message(STATUS "[EUGO] Skipping Triton CLI applications build")
+endif()
+
 add_subdirectory(test)
 
 if(TRITON_BUILD_UT)
@@ -335,3 +362,9 @@ if(TRITON_BUILD_UT)
     USES_TERMINAL
   )
 endif()
+
+
+# === @begin: Eugo wrapper @EUGO_CHANGE ===
+# `SKBUILD_PLATLIB_DIR` resolves to `site-packages`
+include(eugo_wrapper.cmake)
+# === @end: Eugo wrapper ===

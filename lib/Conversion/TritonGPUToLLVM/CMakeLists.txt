@@ -29,7 +29,7 @@ add_triton_library(TritonGPUToLLVM
     MLIRPass
     MLIRGPUDialect
     MLIRGPUToNVVMTransforms
-    MLIRGPUToROCDLTransforms
+    # MLIRGPUToROCDLTransforms // @EUGO_CHANGE - no ROCM support
     MLIRGPUTransforms
     TritonAnalysis
     TritonIR

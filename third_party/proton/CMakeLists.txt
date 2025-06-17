@@ -35,8 +35,8 @@ if(DEFINED CUPTI_LIB_DIR)
 endif()
 
 include_directories(${CUPTI_INCLUDE_DIR})
-include_directories(SYSTEM ${ROCTRACER_INCLUDE_DIR})
-target_compile_definitions(proton PRIVATE __HIP_PLATFORM_AMD__)
+# include_directories(SYSTEM ${ROCTRACER_INCLUDE_DIR}) # @EUGO_CHANGE - no ROCM support
+# target_compile_definitions(proton PRIVATE __HIP_PLATFORM_AMD__) # @EUGO_CHANGE - no AMD support
 
 target_link_libraries(proton PRIVATE Python3::Module pybind11::headers)
 target_link_options(proton PRIVATE ${PROTON_PYTHON_LDFLAGS})

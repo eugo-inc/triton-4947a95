@@ -16,3 +16,4 @@ mlir_tablegen(TritonAMDGPUEnums.cpp.inc -gen-enum-defs)
 mlir_tablegen(TritonAMDGPUAttrDefs.h.inc -gen-attrdef-decls)
 mlir_tablegen(TritonAMDGPUAttrDefs.cpp.inc -gen-attrdef-defs)
 add_public_tablegen_target(TritonAMDGPUAttrDefsIncGen)
+# @EUGO_CHANGE - no AMD support, but we don't comment anything out here as we don't `add_subdirectory` for `amd` in `CMakeLists.txt` in the root of the project.

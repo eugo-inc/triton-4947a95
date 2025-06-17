@@ -43,3 +43,4 @@
 #include "amd/include/Dialect/TritonAMDGPU/IR/Ops.h.inc"
 
 #endif // TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
+// @EUGO_CHANGE - no AMD support, but we don't comment anything out here as we don't `add_subdirectory` for `amd` in `CMakeLists.txt` in the root of the project.

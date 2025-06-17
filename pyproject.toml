@@ -1,5 +1,46 @@
+# @EUGO_CHANGE
 [build-system]
-requires = ["setuptools>=40.8.0", "wheel", "cmake>=3.18", "ninja>=1.11.1"]
+
+requires = [
+    "scikit_build_core",
+    "pybind11"
+]
+build-backend = "scikit_build_core.build"
+
+
+[tool.mypy]
+mypy_path = "$MYPY_CONFIG_FILE_DIR/python"
+files = [
+    "python/triton/knobs.py",
+    "python/triton/runtime/build.py",
+    "python/triton/runtime/driver.py",
+    "python/triton/_utils.py",
+    "python/test/unit/test_knobs.py",
+    "python/test/unit/runtime/test_build.py",
+    "python/test/unit/runtime/test_compilation_listener.py",
+]
+exclude = ["/build/"]
+follow_imports = "silent"
+
+
+# @EUGO_CHANGE
+[project]
+name = "triton"
+version = "3.4.0"  # @TODO+: Keep in sync with upstream version
+
+# @EUGO_CHANGE
+[tool.scikit-build]
+sdist.exclude = []
+install.strip = false  # Default value is `true`, but we perform stripping ourselves
+
+
+# @EUGO_CHANGE
+# IMPORTANT: we need to exclude them twice. First in `CMakeLists.txt` when copying python/triton (because they are nested there), and second here in `pyproject.toml` when they are copied together with library targets.
+[tool.scikit-build.wheel]
+exclude = [
+    "triton/_C/include/**"
+]
+
 
 [tool.yapf]
 based_on_style = "pep8"
@@ -8,6 +49,12 @@ disable_split_list_with_comment = true
 each_dict_entry_on_separate_line=false
 split_before_named_assigns = false
 split_complex_comprehension = true
+
+# We're incrementally switching from autopep8 to ruff.
+[tool.autopep8]
+aggressive = 1
+ignore = "E501,E701,E731,W690,W503"
+max_line_length = 88
 
 [tool.yapfignore]
 ignore_patterns = [
@@ -19,8 +66,10 @@ ignore_patterns = [
     "python/test/unit/language/test_line_info.py"
 ]
 
+
 [tool.ruff]
 line-length = 120
+
 
 [tool.ruff.lint]
 ignore = ["E501", "E701", "E731", "E741"]

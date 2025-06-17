@@ -1,13 +1,13 @@
-#include "Profiler/Roctracer/RoctracerProfiler.h"
-#include "Context/Context.h"
-#include "Data/Metric.h"
-#include "Driver/GPU/HipApi.h"
-#include "Driver/GPU/HsaApi.h"
-#include "Driver/GPU/RoctracerApi.h"
+// #include "Profiler/Roctracer/RoctracerProfiler.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
+// #include "Context/Context.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
+// #include "Data/Metric.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
+// #include "Driver/GPU/HipApi.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
+// #include "Driver/GPU/HsaApi.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
+// #include "Driver/GPU/RoctracerApi.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
 
-#include "hip/amd_detail/hip_runtime_prof.h"
-#include "roctracer/roctracer_ext.h"
-#include "roctracer/roctracer_hip.h"
+// #include "hip/amd_detail/hip_runtime_prof.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
+// #include "roctracer/roctracer_ext.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
+// #include "roctracer/roctracer_hip.h" // @EUGO_CHANGE - no ROCM/HIP/HSA support
 
 #include <cstdlib>
 #include <deque>
