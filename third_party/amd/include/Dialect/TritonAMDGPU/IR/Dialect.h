@@ -21,26 +21,26 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
-#define TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
+// #ifndef TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
+// #define TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
 
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/Dialect.h"
-#include "mlir/IR/PatternMatch.h"
-#include "triton/Dialect/Triton/IR/Traits.h"
+// #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+// #include "mlir/Dialect/Tensor/IR/Tensor.h"
+// #include "mlir/IR/BuiltinOps.h"
+// #include "mlir/IR/Dialect.h"
+// #include "mlir/IR/PatternMatch.h"
+// #include "triton/Dialect/Triton/IR/Traits.h"
 
-// clang-format off
-#include "amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc"
-#include "amd/include/Dialect/TritonAMDGPU/IR/TritonAMDGPUEnums.h.inc"
-// clang-format on
+// // clang-format off
+// #include "amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc"
+// #include "amd/include/Dialect/TritonAMDGPU/IR/TritonAMDGPUEnums.h.inc"
+// // clang-format on
 
-#define GET_ATTRDEF_CLASSES
-#include "amd/include/Dialect/TritonAMDGPU/IR/TritonAMDGPUAttrDefs.h.inc"
+// #define GET_ATTRDEF_CLASSES
+// #include "amd/include/Dialect/TritonAMDGPU/IR/TritonAMDGPUAttrDefs.h.inc"
 
-#define GET_OP_CLASSES
-#include "amd/include/Dialect/TritonAMDGPU/IR/Ops.h.inc"
+// #define GET_OP_CLASSES
+// #include "amd/include/Dialect/TritonAMDGPU/IR/Ops.h.inc"
 
-#endif // TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
-// @EUGO_CHANGE - no AMD support, but we don't comment anything out here as we don't `add_subdirectory` for `amd` in `CMakeLists.txt` in the root of the project.
+// #endif // TRITON_THIRD_PARTY_AMD_INCLUDE_DIALECT_TRITONAMDGPU_IR_DIALECT_H_
+// @EUGO_CHANGE - no AMD support
