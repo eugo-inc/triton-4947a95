@@ -188,18 +188,14 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
       # Include the plugin as part of the build, placing the build output under
       # ${TRITON_BINARY_DIR}/third_party/${PLUGIN_NAME}
-            # @EUGO_CHANGE - we don't build AMD plugin
-      if(NOT PLUGIN_NAME STREQUAL "amd")
-        cmake_path(APPEND TRITON_BINARY_DIR "third_party" ${PLUGIN_NAME} OUTPUT_VARIABLE PLUGIN_DIR_BUILD_OUTPUT)
-        message(STATUS "Building plugin '${PLUGIN_NAME}' from ${PLUGIN_DIR} with output ${PLUGIN_DIR_BUILD_OUTPUT}")
-        add_subdirectory(${PLUGIN_DIR} ${PLUGIN_DIR_BUILD_OUTPUT})
-      else()
-        message(STATUS "Skipping plugin '${PLUGIN_NAME}' as it is 'amd' and we don't build AMD support")
-      endif()
+      cmake_path(APPEND TRITON_BINARY_DIR "third_party" ${PLUGIN_NAME} OUTPUT_VARIABLE PLUGIN_DIR_BUILD_OUTPUT)
+      message(STATUS "Building plugin '${PLUGIN_NAME}' from ${PLUGIN_DIR} with output ${PLUGIN_DIR_BUILD_OUTPUT}")
+      add_subdirectory(${PLUGIN_DIR} ${PLUGIN_DIR_BUILD_OUTPUT})
     endforeach()
   endif()
 
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
+    message(STATUS "Building CODEGEN_BACKEND '${CODEGEN_BACKEND}'")
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
 
@@ -284,7 +280,6 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
   add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                   ${PYTHON_SRC_PATH}/ir.cc
-                  ${PYTHON_SRC_PATH}/gluon_ir.cc
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
                   ${PYTHON_SRC_PATH}/llvm.cc)
@@ -296,7 +291,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
     set_target_properties(triton PROPERTIES SUFFIX ".pyd")
     set_target_properties(triton PROPERTIES PREFIX "lib")
   else()
-    target_link_libraries(triton PRIVATE z)
+    # @EUGO_CHANGE - dont link with zlib, we don't need it
+    # target_link_libraries(triton PRIVATE z)
   endif()
   target_link_options(triton PRIVATE ${LLVM_LDFLAGS})
 
@@ -351,6 +347,8 @@ else()
   message(STATUS "[EUGO] Skipping Triton CLI applications build")
 endif()
 
+# @EUGO_NOTE - we can't exclude the entire test directory because it builds libGPUInstrumentationTestLib and it's shipped in the Python wheel so we preserve it
+# we DK if it's actually needed at runtime but :shrug:
 add_subdirectory(test)
 
 if(TRITON_BUILD_UT)

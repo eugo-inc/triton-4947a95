@@ -20,12 +20,12 @@ set(TRITON_TEST_DEPENDS
 set(FILECHECK_PATH "${LLVM_LIBRARY_DIR}/../bin/FileCheck")
 set(LIT_ARGS "-Dfilecheck=${FILECHECK_PATH}")
 
-# add_lit_testsuite(check-triton-lit-tests "Running the triton regression tests" # @EUGO_CHANGE - no testing support
+# add_lit_testsuite(check-triton-lit-tests "Running the triton regression tests" # @EUGO_CHANGE - no testing support, will fail if not commented since we're not building `/bin`
 #   ${CMAKE_CURRENT_BINARY_DIR}
 #   ARGS ${LIT_ARGS}
 #   DEPENDS ${TRITON_TEST_DEPENDS}
 #   )
 
-# set_target_properties(check-triton-lit-tests PROPERTIES FOLDER "Tests") # @EUGO_CHANGE - no testing support
+# set_target_properties(check-triton-lit-tests PROPERTIES FOLDER "Tests") # @EUGO_CHANGE - no testing support, will fail if not commented since we're not building `/bin`
 
-# add_lit_testsuites(TRITON-LIT-TESTS ${CMAKE_CURRENT_SOURCE_DIR} DEPENDS ${TRITON_TEST_DEPENDS}) # @EUGO_CHANGE - no testing support
+# add_lit_testsuites(TRITON-LIT-TESTS ${CMAKE_CURRENT_SOURCE_DIR} DEPENDS ${TRITON_TEST_DEPENDS}) # @EUGO_CHANGE - no testing support, will fail if not commented since we're not building `/bin`
