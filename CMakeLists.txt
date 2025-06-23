@@ -8,8 +8,10 @@ endif()
 
 include(ExternalProject)
 
-
-set(CMAKE_CXX_STANDARD 17) # @EUGO_CHANGE: # TODO+ Override their C++ standard to C++23 when migrating to new version
+# @EUGO_CHANGE: # See bullet (5) in `info.md` in `protomolecule/dependencies/native/triton/info.md`
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
@@ -24,7 +26,7 @@ option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
-option(EUGO_TRITON_BUILD_APPS "Build CLI apps from ./bin" OFF)
+option(EUGO_TRITON_BUILD_APPS "Build CLI apps from ./bin" OFF) # @EUGO_CHANGE: added this CMake option to control whether to build CLI apps or not
 
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -82,7 +84,7 @@ endif()
 # Compiler flags
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(NOT MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++23") # @EUGO_CHANGE: Override their C++ standard to C++23
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS") # @EUGO_CHANGE: Removed -std=gnu++17 and -fPIC
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS")
 endif()
@@ -161,7 +163,7 @@ add_subdirectory(lib)
 # apparently not enough. Currently set linking libstdc++fs for all targets
 # to support some old version GCC compilers like 8.3.0.
 if (NOT WIN32 AND NOT APPLE)
-  # link_libraries(stdc++fs) # @EUGO_CHANGE - we don't have GCC installed
+  # link_libraries(stdc++fs) # @EUGO_CHANGE - this library is libstc++ specific. And it only applies to really old (10+ years) GCC compilers because in modern versions it doesn't exist as standalone library (just part of stdc++)
 endif()
 
 
