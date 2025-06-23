@@ -26,7 +26,7 @@ follow_imports = "silent"
 # @EUGO_CHANGE
 [project]
 name = "triton"
-version = "3.4.0"  # @TODO+: Keep in sync with upstream version
+version = "3.2.0"  # @TODO+: Keep in sync with upstream version
 
 # @EUGO_CHANGE
 [tool.scikit-build]
