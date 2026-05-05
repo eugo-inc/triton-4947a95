@@ -59,7 +59,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
 
 // CHECK: [[NARROW_LAYOUT:#.*]] = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
 // CHECK: [[WIDE_LAYOUT:#.*]] = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
-tt.func public @load_tensors_two_types(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: i32) attributes {noinline = false} {
+tt.func public @load_tensors_two_types(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: i32) {
     %c1024_i32 = arith.constant 1024 : i32
     %0 = tt.get_program_id x : i32
     %1 = arith.muli %0, %c1024_i32 : i32
@@ -93,7 +93,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
 // CHECK-NOT: sizePerThread = [4]
 // CHECK: #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
 // CHECK-NOT: sizePerThread = [4]
-tt.func public @load_tensors_two_types(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: i32) attributes {noinline = false} {
+tt.func public @load_tensors_two_types(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg3: i32) {
     %c1024_i32 = arith.constant 1024 : i32
     %0 = tt.get_program_id x : i32
     %1 = arith.muli %0, %c1024_i32 : i32
@@ -121,23 +121,106 @@ tt.func public @load_tensors_two_types(%arg0: !tt.ptr<f32> {tt.divisibility = 16
 
 // -----
 
-// COM: Reproducer for issue #3866
-// CHECK-LABEL: @test_3866
-// CHECK: tt.load {{.*}} : !tt.ptr<tensor<64x16xf16>
-module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 16 : i32} {
-  tt.func public @test_3866(%arg0: !tt.ptr<f16>, %arg1: i32, %arg2: i64) {
-    %0 = tt.make_tensor_ptr %arg0, [%arg2, %arg2], [%arg2, %arg2], [%arg1, %arg1] {order = array<i32: 1, 0>} : <tensor<64x16xf16>>
-    %1 = tt.load %0 : !tt.ptr<tensor<64x16xf16>>
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @atomic_add_i32
+// CHECK-NOT: sizePerThread = [4]
+// CHECK: tt.atomic_rmw add, relaxed, gpu, %{{.*}}, %{{.*}}, %{{.*}} : (tensor<1024x!tt.ptr<i32>, #blocked>, tensor<1024xi32, #blocked>, tensor<1024xi1, #blocked>) -> tensor<1024xi32, #blocked>
+// CHECK-NOT: sizePerThread = [4]
+tt.func public @atomic_add_i32(%arg0: !tt.ptr<i32> {tt.divisibility = 16 : i32}, %arg1: i32) {
+    %c1024_i32 = arith.constant 1024 : i32
+    %c1_i32 = arith.constant dense<1> : tensor<1024xi32, #blocked>
+    %0 = tt.get_program_id x : i32
+    %1 = arith.muli %0, %c1024_i32 : i32
+    %2 = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32, #blocked>
+    %3 = tt.splat %1 : i32 -> tensor<1024xi32, #blocked>
+    %4 = arith.addi %3, %2 : tensor<1024xi32, #blocked>
+    %5 = tt.splat %arg1 : i32 -> tensor<1024xi32, #blocked>
+    %6 = arith.cmpi "slt", %4, %5 : tensor<1024xi32, #blocked>
+    %7 = tt.splat %arg0 : !tt.ptr<i32> -> tensor<1024x!tt.ptr<i32>, #blocked>
+    %8 = tt.addptr %7, %4 : tensor<1024x!tt.ptr<i32>, #blocked>, tensor<1024xi32, #blocked>
+    %9 = tt.atomic_rmw add, relaxed, gpu, %8, %c1_i32, %6 : (tensor<1024x!tt.ptr<i32>, #blocked>, tensor<1024xi32, #blocked>, tensor<1024xi1, #blocked>) -> tensor<1024xi32, #blocked>
     tt.return
-  }
+}
+}
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:80", "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @atomic_add_f32_cuda80
+// CHECK-NOT: sizePerThread = [4]
+// CHECK: tt.atomic_rmw fadd, relaxed, gpu, %{{.*}}, %{{.*}}, %{{.*}} : (tensor<1024x!tt.ptr<f32>, #blocked>, tensor<1024xf32, #blocked>, tensor<1024xi1, #blocked>) -> tensor<1024xf32, #blocked>
+// CHECK-NOT: sizePerThread = [4]
+tt.func public @atomic_add_f32_cuda80(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: i32) {
+    %c1024_i32 = arith.constant 1024 : i32
+    %cst = arith.constant dense<1.000000e+00> : tensor<1024xf32, #blocked>
+    %0 = tt.get_program_id x : i32
+    %1 = arith.muli %0, %c1024_i32 : i32
+    %2 = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32, #blocked>
+    %3 = tt.splat %1 : i32 -> tensor<1024xi32, #blocked>
+    %4 = arith.addi %3, %2 : tensor<1024xi32, #blocked>
+    %5 = tt.splat %arg1 : i32 -> tensor<1024xi32, #blocked>
+    %6 = arith.cmpi "slt", %4, %5 : tensor<1024xi32, #blocked>
+    %7 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<1024x!tt.ptr<f32>, #blocked>
+    %8 = tt.addptr %7, %4 : tensor<1024x!tt.ptr<f32>, #blocked>, tensor<1024xi32, #blocked>
+    %9 = tt.atomic_rmw fadd, relaxed, gpu, %8, %cst, %6 : (tensor<1024x!tt.ptr<f32>, #blocked>, tensor<1024xf32, #blocked>, tensor<1024xi1, #blocked>) -> tensor<1024xf32, #blocked>
+    tt.return
+}
+}
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:80", "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @atomic_add_f16_cuda80
+// CHECK: ttg.convert_layout %{{.*}} : tensor<1024x!tt.ptr<f16>, #blocked> -> tensor<1024x!tt.ptr<f16>, #[[ATOMIC_F16_LAYOUT:.*]]>
+// CHECK: tt.atomic_rmw fadd, relaxed, gpu, %{{.*}}, %{{.*}}, %{{.*}} : (tensor<1024x!tt.ptr<f16>, #[[ATOMIC_F16_LAYOUT]]>, tensor<1024xf16, #[[ATOMIC_F16_LAYOUT]]>, tensor<1024xi1, #[[ATOMIC_F16_LAYOUT]]>) -> tensor<1024xf16, #[[ATOMIC_F16_LAYOUT]]>
+tt.func public @atomic_add_f16_cuda80(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: i32) {
+    %c1024_i32 = arith.constant 1024 : i32
+    %cst = arith.constant dense<1.000000e+00> : tensor<1024xf16, #blocked>
+    %0 = tt.get_program_id x : i32
+    %1 = arith.muli %0, %c1024_i32 : i32
+    %2 = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32, #blocked>
+    %3 = tt.splat %1 : i32 -> tensor<1024xi32, #blocked>
+    %4 = arith.addi %3, %2 : tensor<1024xi32, #blocked>
+    %5 = tt.splat %arg1 : i32 -> tensor<1024xi32, #blocked>
+    %6 = arith.cmpi "slt", %4, %5 : tensor<1024xi32, #blocked>
+    %7 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<1024x!tt.ptr<f16>, #blocked>
+    %8 = tt.addptr %7, %4 : tensor<1024x!tt.ptr<f16>, #blocked>, tensor<1024xi32, #blocked>
+    %9 = tt.atomic_rmw fadd, relaxed, gpu, %8, %cst, %6 : (tensor<1024x!tt.ptr<f16>, #blocked>, tensor<1024xf16, #blocked>, tensor<1024xi1, #blocked>) -> tensor<1024xf16, #blocked>
+    tt.return
+}
+}
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+// CHECK: #[[$ATOMIC_F16_LAYOUT:.*]] = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1250", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @atomic_add_f16_gfx1250
+  tt.func public @atomic_add_f16_gfx1250(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: i32) {
+    %c1024_i32 = arith.constant 1024 : i32
+    %cst = arith.constant dense<1.000000e+00> : tensor<1024xf16, #blocked>
+    %0 = tt.get_program_id x : i32
+    %1 = arith.muli %0, %c1024_i32 : i32
+    %2 = tt.make_range {end = 1024 : i32, start = 0 : i32} : tensor<1024xi32, #blocked>
+    %3 = tt.splat %1 : i32 -> tensor<1024xi32, #blocked>
+    %4 = arith.addi %3, %2 : tensor<1024xi32, #blocked>
+    %5 = tt.splat %arg1 : i32 -> tensor<1024xi32, #blocked>
+    %6 = arith.cmpi "slt", %4, %5 : tensor<1024xi32, #blocked>
+    %7 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<1024x!tt.ptr<f16>, #blocked>
+    %8 = tt.addptr %7, %4 : tensor<1024x!tt.ptr<f16>, #blocked>, tensor<1024xi32, #blocked>
+    // CHECK: ttg.convert_layout %{{.*}} : tensor<1024x!tt.ptr<f16>, #blocked> -> tensor<1024x!tt.ptr<f16>, #[[$ATOMIC_F16_LAYOUT]]>
+    // CHECK: tt.atomic_rmw fadd, relaxed, gpu, %{{.*}}, %{{.*}}, %{{.*}} : (tensor<1024x!tt.ptr<f16>, #[[$ATOMIC_F16_LAYOUT]]>, tensor<1024xf16, #[[$ATOMIC_F16_LAYOUT]]>, tensor<1024xi1, #[[$ATOMIC_F16_LAYOUT]]>) -> tensor<1024xf16, #[[$ATOMIC_F16_LAYOUT]]>
+    %9 = tt.atomic_rmw fadd, relaxed, gpu, %8, %cst, %6 : (tensor<1024x!tt.ptr<f16>, #blocked>, tensor<1024xf16, #blocked>, tensor<1024xi1, #blocked>) -> tensor<1024xf16, #blocked>
+    tt.return
+}
 }
 
 // -----
 
 // COM: Reproducer for issue #5122
 // CHECK-LABEL: @test_5122
-module {
-  tt.func public @test_5122(%arg0: i32) attributes {noinline = false} {
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 16 : i32} {
+  tt.func public @test_5122(%arg0: i32) {
     %c1_i32 = arith.constant 1 : i32
     %0 = arith.cmpi sgt, %arg0, %c1_i32 : i32
     scf.if %0 {
@@ -157,6 +240,75 @@ module {
         scf.yield %5 : i32
       }
     }
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0]}>
+#blocked1 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+#blocked2 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>
+#blocked3 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>
+
+// CHECK: [[COALESCED_LAYOUT:#.*]] = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [16, 2], warpsPerCTA = [1, 4], order = [0, 1]}>
+
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
+
+// CHECK: @coalesce_poison
+tt.func @coalesce_poison(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: i32, %arg2: i1) {
+  %c0_i32 = arith.constant 0 : i32
+  %c1_i32 = arith.constant 1 : i32
+  %0 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x64x!tt.ptr<f16>, #blocked>
+  %1 = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked1>
+  %2 = ttg.convert_layout %1 : tensor<128xi32, #blocked1> -> tensor<128xi32, #ttg.slice<{dim = 1, parent = #blocked2}>>
+  %3 = tt.expand_dims %2 {axis = 1 : i32} : tensor<128xi32, #ttg.slice<{dim = 1, parent = #blocked2}>> -> tensor<128x1xi32, #blocked2>
+  %4 = ttg.convert_layout %3 : tensor<128x1xi32, #blocked2> -> tensor<128x1xi32, #blocked3>
+  %5 = tt.broadcast %4 {axis = 1 : i32} : tensor<128x1xi32, #blocked3> -> tensor<128x64xi32, #blocked3>
+  %6 = ttg.convert_layout %5 : tensor<128x64xi32, #blocked3> -> tensor<128x64xi32, #blocked>
+  %7 = tt.addptr %0, %6 : tensor<128x64x!tt.ptr<f16>, #blocked>, tensor<128x64xi32, #blocked>
+
+  %8 = ub.poison : tensor<128x64x!tt.ptr<f16>, #blocked>
+  // CHECK: scf.if
+  %9 = scf.if %arg2 -> (tensor<128x64x!tt.ptr<f16>, #blocked>) {
+    scf.yield %8 : tensor<128x64x!tt.ptr<f16>, #blocked>
+  } else {
+    scf.yield %7 : tensor<128x64x!tt.ptr<f16>, #blocked>
+  }
+  // CHECK: [[PTR:%.*]] = ttg.convert_layout %{{.*}} : tensor<128x64x!tt.ptr<f16>, #{{.*}}> -> tensor<128x64x!tt.ptr<f16>, [[COALESCED_LAYOUT]]>
+  // CHECK-NEXT: tt.load [[PTR]]
+  %10 = tt.load %9 : tensor<128x64x!tt.ptr<f16>, #blocked>
+  tt.return
+}
+
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1, 1], threadsPerWarp = [2, 4, 4], warpsPerCTA = [4, 1, 1], order = [2, 1, 0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @load_3D_contig_1(%arg: !tt.ptr<i8> {tt.divisibility = 16 : i32}) {
+    %50 = tt.splat %arg : !tt.ptr<i8> -> tensor<32x4x4x!tt.ptr<i8>, #blocked>
+    // This checks that the pass picks the row-major ordering by default for elements with contiguity 1.
+    // CHECK: #blocked = #ttg.blocked<{sizePerThread = [1, 1, 1], threadsPerWarp = [2, 4, 4], warpsPerCTA = [4, 1, 1], order = [2, 1, 0]}>
+    // CHECK:  tt.load %1 : tensor<32x4x4x!tt.ptr<i8>, #blocked>
+    %108 = tt.load %50 : tensor<32x4x4x!tt.ptr<i8>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+
+// CHECK: #[[$LAYOUT:.*]] = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0]}>
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @descriptor_store
+  tt.func public @descriptor_store(%arg0: !tt.tensordesc<2x64xf16>) {
+    %c0_i32 = arith.constant 0 : i32
+    %cst = arith.constant dense<0.000000e+00> : tensor<2x64xf16, #blocked>
+    // CHECK: %[[C:.+]] = ttg.convert_layout %{{.+}} : tensor<2x64xf16, #{{.+}}> -> tensor<2x64xf16, #[[$LAYOUT]]>
+    // CHECK: tt.descriptor_store {{.*}}, %[[C]] : !tt.tensordesc<2x64xf16>, tensor<2x64xf16, #[[$LAYOUT]]>
+    tt.descriptor_store %arg0[%c0_i32, %c0_i32], %cst : !tt.tensordesc<2x64xf16>, tensor<2x64xf16, #blocked>
     tt.return
   }
 }

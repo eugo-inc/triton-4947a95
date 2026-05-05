@@ -1,14 +1,19 @@
+import multiprocessing
 import os
+import queue
 import re
+import tempfile
 import numpy as np
+import sys
 import torch
 import triton
 import triton.language as tl
-from triton.backends.nvidia.compiler import _path_to_binary
+from triton import knobs
+from typing import Optional, Set, Union
+from dataclasses import dataclass
 import pytest
 
 from numpy.random import RandomState
-from typing import Optional, Union
 from triton.runtime.jit import TensorWrapper, reinterpret, type_canonicalisation_dict
 
 int_dtypes = ['int8', 'int16', 'int32', 'int64']
@@ -20,6 +25,7 @@ dtypes = integral_dtypes + float_dtypes
 dtypes_with_bfloat16 = dtypes + ['bfloat16']
 torch_float8_dtypes = ['float8_e4m3fn', 'float8_e5m2']
 torch_dtypes = ['bool'] + int_dtypes + ['uint8'] + float_dtypes + ['bfloat16']
+tma_dtypes = sorted(set(dtypes_with_bfloat16) - {"int64", "uint64", "float64"})
 
 
 def is_interpreter():
@@ -37,8 +43,28 @@ def is_cuda():
     return False if target is None else target.backend == "cuda"
 
 
-def is_hopper():
+def is_ampere_or_newer():
+    return is_cuda() and torch.cuda.get_device_capability()[0] >= 8
+
+
+def is_blackwell():
+    return is_cuda() and torch.cuda.get_device_capability()[0] in [10, 11]
+
+
+def is_blackwell_ultra():
+    return is_cuda() and torch.cuda.get_device_capability()[0:2] == (10, 3)
+
+
+def is_hopper_or_newer():
     return is_cuda() and torch.cuda.get_device_capability()[0] >= 9
+
+
+def is_hopper():
+    return is_cuda() and torch.cuda.get_device_capability()[0] == 9
+
+
+def is_sm12x():
+    return is_cuda() and torch.cuda.get_device_capability()[0] == 12
 
 
 def is_hip():
@@ -46,32 +72,56 @@ def is_hip():
     return False if target is None else target.backend == "hip"
 
 
-def is_hip_mi200():
+def is_hip_cdna2():
     target = get_current_target()
-    if target is None or target.backend != 'hip':
-        return False
-    return target.arch == 'gfx90a'
+    return target is not None and target.backend == 'hip' and target.arch == 'gfx90a'
 
 
-def is_hip_mi300():
+def is_hip_cdna3():
     target = get_current_target()
-    if target is None or target.backend != 'hip':
-        return False
-    return target.arch in ('gfx940', 'gfx941', 'gfx942')
+    return target is not None and target.backend == 'hip' and target.arch == 'gfx942'
+
+
+def is_hip_cdna4():
+    target = get_current_target()
+    return target is not None and target.backend == 'hip' and target.arch == 'gfx950'
+
+
+def is_hip_rdna3():
+    target = get_current_target()
+    return target is not None and target.backend == 'hip' and 'gfx11' in target.arch
+
+
+def is_hip_rdna4():
+    target = get_current_target()
+    # check for gfx120 instead of gfx12, to avoid matching gfx1250
+    return target is not None and target.backend == 'hip' and 'gfx120' in target.arch
+
+
+def is_hip_gfx1250():
+    target = get_current_target()
+    return target is not None and target.backend == 'hip' and 'gfx1250' in target.arch
+
+
+def is_hip_cdna3_or_newer():
+    return is_hip_cdna3() or is_hip_cdna4()
 
 
 def is_hip_cdna():
-    return is_hip_mi200() or is_hip_mi300()
+    return is_hip_cdna2() or is_hip_cdna3() or is_hip_cdna4()
+
+
+def is_hip_rdna():
+    return is_hip_rdna3() or is_hip_rdna4()
+
+
+def get_hip_lds_size():
+    return 163840 if is_hip_cdna4() else 65536
 
 
 def is_xpu():
     target = get_current_target()
     return False if target is None else target.backend == "xpu"
-
-
-def get_arch():
-    target = get_current_target()
-    return "" if target is None else str(target.arch)
 
 
 def numpy_random(shape, dtype_str, rs: Optional[RandomState] = None, low=None, high=None):
@@ -124,7 +174,7 @@ def to_triton(x: np.ndarray, device, dst_type=None) -> Union[TensorWrapper, torc
 
 
 def str_to_triton_dtype(x: str) -> tl.dtype:
-    return tl.str_to_ty(type_canonicalisation_dict[x])
+    return tl.str_to_ty(type_canonicalisation_dict[x], None)
 
 
 def torch_dtype_name(dtype) -> str:
@@ -150,13 +200,23 @@ def to_numpy(x):
 
 
 def supports_tma(byval_only=False):
+    if is_interpreter():
+        return True
     if not is_cuda():
         return False
-    _, cuda_version = _path_to_binary("ptxas")
+    cuda_version = knobs.nvidia.ptxas.version
     min_cuda_version = (12, 0) if byval_only else (12, 3)
     cuda_version_tuple = tuple(map(int, cuda_version.split(".")))
     assert len(cuda_version_tuple) == 2, cuda_version_tuple
     return torch.cuda.get_device_capability()[0] >= 9 and cuda_version_tuple >= min_cuda_version
+
+
+def supports_ws():
+    if is_interpreter():
+        return True
+    if not is_cuda():
+        return False
+    return torch.cuda.get_device_capability()[0] >= 9
 
 
 def tma_skip_msg(byval_only=False):
@@ -167,3 +227,110 @@ def tma_skip_msg(byval_only=False):
 
 
 requires_tma = pytest.mark.skipif(not supports_tma(), reason=tma_skip_msg())
+
+
+def default_alloc_fn(size: int, align: int, _):
+    return torch.empty(size, dtype=torch.int8, device="cuda")
+
+
+def unwrap_tensor(t: Union[torch.Tensor, triton.runtime.jit.TensorWrapper]) -> torch.Tensor:
+    if isinstance(t, triton.runtime.jit.TensorWrapper):
+        return t.base
+    return t
+
+
+@dataclass
+class ProcessResult:
+    exc: None | BaseException
+    driver_stderr_output: str
+
+
+def _run_in_process_worker(client_fn, q, args, kwargs, env, stderr_file):
+    if env is not None:
+        os.environ.update(env)
+
+    # Capture driver/runtime writes to stderr that bypass Python's file objects.
+    with open(stderr_file, "w+b") as tmp_stderr:
+        saved_stderr_fd = os.dup(2)
+        os.dup2(tmp_stderr.fileno(), 2)
+        exc = None
+
+        try:
+            client_fn(*args, **kwargs)
+            # Raise any CUDA errors
+            torch.cuda.synchronize()
+        except Exception as e:
+            exc = e
+        finally:
+            sys.stderr.flush()
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
+            q.put(exc)
+
+
+def run_in_process(client_fn, args=(), kwargs=None, env=None):
+    if kwargs is None:
+        kwargs = {}
+
+    ctx = multiprocessing.get_context("forkserver")
+    q = ctx.Queue()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stderr_file = os.path.join(tmpdir, "err.log")
+        process = ctx.Process(target=_run_in_process_worker, args=(client_fn, q, args, kwargs, env, stderr_file))
+        process.start()
+        process.join()
+        with open(stderr_file, "r") as f:
+            stderr = f.read()
+    exc = None
+    try:
+        exc = q.get(timeout=1)
+    except queue.Empty:
+        print(stderr, file=sys.stderr)
+        raise RuntimeError(f"child process exited with code {process.exitcode} without returning a result") from None
+    return ProcessResult(exc, stderr)
+
+
+def _fresh_knobs_impl(skipped_attr: Optional[Set[str]] = None):
+    from triton import knobs
+
+    if skipped_attr is None:
+        skipped_attr = set()
+
+    monkeypatch = pytest.MonkeyPatch()
+
+    knobs_map = {
+        name: knobset
+        for name, knobset in knobs.__dict__.items()
+        if isinstance(knobset, knobs.base_knobs) and knobset != knobs.base_knobs and name not in skipped_attr
+    }
+
+    # We store which variables we need to unset below in finally because
+    # monkeypatch doesn't appear to reset variables that were never set
+    # before the monkeypatch.delenv call below.
+    env_to_unset = []
+    prev_propagate_env = knobs.propagate_env
+
+    def fresh_function():
+        nonlocal env_to_unset
+        for name, knobset in knobs_map.items():
+            setattr(knobs, name, knobset.copy().reset())
+            for knob in knobset.knob_descriptors.values():
+                if knob.key in os.environ:
+                    monkeypatch.delenv(knob.key, raising=False)
+                else:
+                    env_to_unset.append(knob.key)
+        knobs.propagate_env = True
+        return knobs
+
+    def reset_function():
+        for name, knobset in knobs_map.items():
+            setattr(knobs, name, knobset)
+        # `undo` should be placed before `del os.environ`
+        # Otherwise, it may restore environment variables that monkeypatch deleted
+        monkeypatch.undo()
+        for k in env_to_unset:
+            if k in os.environ:
+                del os.environ[k]
+        knobs.propagate_env = prev_propagate_env
+
+    return fresh_function, reset_function

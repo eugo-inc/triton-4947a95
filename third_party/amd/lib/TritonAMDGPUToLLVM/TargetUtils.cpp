@@ -9,12 +9,17 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
   // See https://llvm.org/docs/AMDGPUUsage.html#processors for how to categorize
   // the following target gfx architectures.
 
+  if (kind == llvm::AMDGPU::GK_GFX1250)
+    return ISAFamily::GFX1250;
+
+  if (kind == llvm::AMDGPU::GK_GFX906)
+    return ISAFamily::GCN5_1;
+
   // CDNA ISA cases
   switch (kind) {
   case llvm::AMDGPU::GK_GFX950:
+    return ISAFamily::CDNA4;
   case llvm::AMDGPU::GK_GFX942:
-  case llvm::AMDGPU::GK_GFX941:
-  case llvm::AMDGPU::GK_GFX940:
     return ISAFamily::CDNA3;
   case llvm::AMDGPU::GK_GFX90A:
     return ISAFamily::CDNA2;
@@ -24,8 +29,10 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
     break;
   }
 
-  // RNDA ISA cases
-  if (kind >= llvm::AMDGPU::GK_GFX1100 && kind <= llvm::AMDGPU::GK_GFX1201)
+  // RDNA ISA cases
+  if (kind >= llvm::AMDGPU::GK_GFX1200 && kind <= llvm::AMDGPU::GK_GFX1201)
+    return ISAFamily::RDNA4;
+  if (kind >= llvm::AMDGPU::GK_GFX1100 && kind <= llvm::AMDGPU::GK_GFX1153)
     return ISAFamily::RDNA3;
   if (kind >= llvm::AMDGPU::GK_GFX1030 && kind <= llvm::AMDGPU::GK_GFX1036)
     return ISAFamily::RDNA2;
@@ -33,6 +40,52 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
     return ISAFamily::RDNA1;
 
   return ISAFamily::Unknown;
+}
+
+bool supportsVDot(llvm::StringRef arch) {
+  switch (deduceISAFamily(arch)) {
+  case AMD::ISAFamily::GCN5_1:
+  case AMD::ISAFamily::CDNA1:
+  case AMD::ISAFamily::CDNA2:
+  case AMD::ISAFamily::CDNA3:
+  case AMD::ISAFamily::CDNA4:
+  case AMD::ISAFamily::RDNA2:
+  case AMD::ISAFamily::RDNA3:
+  case AMD::ISAFamily::RDNA4:
+    return true;
+  default:
+    break;
+  }
+  return false;
+}
+
+bool isCDNA(ISAFamily isaFamily) {
+  switch (isaFamily) {
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+  case ISAFamily::CDNA4:
+  case ISAFamily::GFX1250:
+    return true;
+  default:
+    break;
+  }
+
+  return false;
+}
+
+bool isRDNA(ISAFamily isaFamily) {
+  switch (isaFamily) {
+  case ISAFamily::RDNA1:
+  case ISAFamily::RDNA2:
+  case ISAFamily::RDNA3:
+  case ISAFamily::RDNA4:
+    return true;
+  default:
+    break;
+  }
+
+  return false;
 }
 
 } // namespace mlir::triton::AMD

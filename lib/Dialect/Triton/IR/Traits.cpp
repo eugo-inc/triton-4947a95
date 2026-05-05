@@ -3,23 +3,42 @@
 #include <numeric>
 
 #include "mlir/IR/TypeUtilities.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir;
 
-static LogicalResult verifySameEncoding(Type typeA, Type typeB,
-                                        bool allowTensorPointerType) {
-  // TODO(Keren): the allowTensorPointerType argument is a hack to allow.
-  // The type checking code is kind of a mess with the current design.
+LogicalResult OpTrait::impl::verifyEquivalentTensorType(Type typeA,
+                                                        Type typeB) {
+  auto tensorTypeA = dyn_cast<RankedTensorType>(typeA);
+  auto tensorTypeB = dyn_cast<RankedTensorType>(typeB);
+  if (!(bool(tensorTypeA) && bool(tensorTypeB)))
+    return typeA == typeB ? success() : failure();
+  auto encodingA = tensorTypeA.getEncoding();
+  auto encodingB = tensorTypeB.getEncoding();
+  auto shapeA = tensorTypeA.getShape();
+  auto shapeB = tensorTypeB.getShape();
+  if (shapeA != shapeB)
+    return failure();
+  if (tensorTypeA.getElementType() != tensorTypeB.getElementType())
+    return failure();
+  // If there's no encoding or the encodings are the same
+  if (encodingA == encodingB)
+    return success();
+  if (bool(encodingA) != bool(encodingB))
+    return failure();
+
+  return cast<triton::DialectInferLayoutInterface>(&encodingA.getDialect())
+      ->verifyLayoutsAreEqual(shapeA, encodingA, encodingB, {});
+}
+
+static LogicalResult verifySameEncoding(Type typeA, Type typeB) {
   auto getEncoding = [=](Type type) -> Attribute {
     Attribute ret;
     if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
       ret = tensorType.getEncoding();
-    }
-    if (!allowTensorPointerType) {
-      assert(!triton::isTensorPointerType(type));
     }
     return ret;
   };
@@ -30,22 +49,20 @@ static LogicalResult verifySameEncoding(Type typeA, Type typeB,
   return encodingA == encodingB ? success() : failure();
 }
 
-LogicalResult
-OpTrait::impl::verifySameOperandsEncoding(Operation *op,
-                                          bool allowTensorPointerType) {
+LogicalResult OpTrait::impl::verifySameOperandsEncoding(Operation *op) {
   if (failed(verifyAtLeastNOperands(op, 1)))
     return failure();
 
   auto type = op->getOperand(0).getType();
   for (auto opType : llvm::drop_begin(op->getOperandTypes(), 1))
-    if (failed(verifySameEncoding(opType, type, allowTensorPointerType)))
+    if (failed(verifySameEncoding(opType, type)))
       return op->emitOpError() << "requires the same encoding for all operands";
 
   return success();
 }
 
-LogicalResult OpTrait::impl::verifySameOperandsAndResultEncoding(
-    Operation *op, bool allowTensorPointerType) {
+LogicalResult
+OpTrait::impl::verifySameOperandsAndResultEncoding(Operation *op) {
   if (op->getNumOperands() == 0)
     return success();
 
@@ -55,11 +72,11 @@ LogicalResult OpTrait::impl::verifySameOperandsAndResultEncoding(
 
   auto type = op->getOperand(0).getType();
   for (auto resultType : op->getResultTypes())
-    if (failed(verifySameEncoding(resultType, type, allowTensorPointerType)))
+    if (failed(verifySameEncoding(resultType, type)))
       return op->emitOpError()
              << "requires the same encoding for all operands and results";
 
-  return verifySameOperandsEncoding(op, allowTensorPointerType);
+  return verifySameOperandsEncoding(op);
 }
 
 LogicalResult OpTrait::impl::verifyTensorSize(Operation *op) {
@@ -105,7 +122,6 @@ LogicalResult OpTrait::impl::verifyTensorSize(Operation *op) {
 // on the op.  They do depend on the *module*, though, and a layout is attached
 // to a module only by virtue of being used in one of the module's ops.
 LogicalResult OpTrait::impl::verifyTensorLayouts(Operation *op) {
-  auto module = op->getParentOfType<ModuleOp>();
   auto checkLayout = [&](Value val, auto makeErr) -> LogicalResult {
     // Only ranked tensors can have layouts.
     auto rankedTy = dyn_cast<RankedTensorType>(val.getType());
@@ -120,7 +136,7 @@ LogicalResult OpTrait::impl::verifyTensorLayouts(Operation *op) {
     auto verifyLayoutInterface =
         dyn_cast<mlir::triton::DialectVerifyTensorLayoutInterface>(&dialect);
     if (verifyLayoutInterface) {
-      return verifyLayoutInterface->verifyTensorLayout(layout, rankedTy, module,
+      return verifyLayoutInterface->verifyTensorLayout(layout, rankedTy, op,
                                                        makeErr);
     }
 

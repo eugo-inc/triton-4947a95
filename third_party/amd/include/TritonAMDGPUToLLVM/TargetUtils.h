@@ -8,16 +8,27 @@ namespace mlir::triton::AMD {
 // A list of ISA families we care about.
 enum class ISAFamily {
   Unknown,
+  GCN5_1,
   CDNA1,
   CDNA2,
   CDNA3,
+  CDNA4,
   RDNA1,
   RDNA2,
   RDNA3,
+  RDNA4,
+  GFX1250,
 };
 
 // Deduces the corresponding ISA family for the given target gfx |arch|.
 ISAFamily deduceISAFamily(llvm::StringRef arch);
+
+// Retursn true if given architecture support V_DOT instruction.
+bool supportsVDot(llvm::StringRef arch);
+
+bool isCDNA(ISAFamily isaFamily);
+
+bool isRDNA(ISAFamily isaFamily);
 
 // Here is a partial definition of DppCtrl enums. For the complete definition,
 // please check:
@@ -26,8 +37,12 @@ enum class DppCtrl : uint32_t {
   QUAD_PERM_FIRST = 0,
   ROW_SHL0 = 0x100,
   ROW_SHR0 = 0x110,
+  ROW_ROR0 = 0x120,
+  ROW_MIRROR = 0x140,
+  ROW_HALF_MIRROR = 0x141,
   BCAST15 = 0x142,
-  BCAST31 = 0x143
+  BCAST31 = 0x143,
+  ROW_XMASK0 = 0x160,
 };
 
 } // namespace mlir::triton::AMD

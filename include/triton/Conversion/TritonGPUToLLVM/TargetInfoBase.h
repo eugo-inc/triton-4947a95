@@ -2,8 +2,10 @@
 #define TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETINFOBASE_H
 
 #include "triton/Conversion/MLIRTypes.h"
+#include "llvm/ADT/ArrayRef.h"
 
 namespace mlir::triton {
+enum class ProgramIDDim : uint32_t;
 
 class TargetInfoBase {
 public:
@@ -13,6 +15,18 @@ public:
 
   virtual Value ballot(RewriterBase &rewriter, Location loc, Type type,
                        Value cmp) const = 0;
+
+  // Emit a block/CTA level barrier that guarantees visibility for the
+  // target address space
+  virtual void barrier(Location loc, RewriterBase &rewriter,
+                       triton::gpu::AddrSpace targets) const = 0;
+  // Emit a cluster-level barrier when supported. Defaults to CTA barrier.
+  virtual void clusterBarrier(Location loc, RewriterBase &rewriter) const = 0;
+  // Insert a warp syncronization barrier that also guarantees local address
+  // space visibility at warp level when supported by the backend.
+  // Backends that do not support warp-level barriers should conservatively
+  // emit a block-level barrier with local address space visibility.
+  virtual void warpSync(Location loc, RewriterBase &rewriter) const = 0;
 
   // Store/load a value from shared memory, either in the same CTA or, if
   // `ctaId` is non-nullopt, in another CTA in the same group.
@@ -25,8 +39,8 @@ public:
                             std::optional<Value> ctaId, Value val,
                             Value pred) const = 0;
   virtual Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                            std::optional<Value> ctaId, Type elemTy,
-                            Value pred) const = 0;
+                            std::optional<Value> ctaId, Type elemTy, Value pred,
+                            Operation *localLoadOp = nullptr) const = 0;
 
   void storeShared(RewriterBase &rewriter, Location loc, Value ptr, Value val,
                    Value pred) const {
@@ -38,15 +52,6 @@ public:
                        pred);
   }
 
-  virtual bool canUseStMatrix(RankedTensorType tensorTy,
-                              ArrayRef<unsigned> repShape,
-                              ArrayRef<unsigned> paddedRepShape,
-                              ArrayRef<unsigned> order,
-                              int swizzleByteSize) const = 0;
-
-  virtual void storeMatrixShared(RewriterBase &rewriter, Location loc,
-                                 Value ptr, Value val) const = 0;
-
   virtual Value shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                            int i) const = 0;
   virtual Value shuffleUp(RewriterBase &rewriter, Location loc, Value val,
@@ -56,13 +61,15 @@ public:
   virtual Value shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                            Value i) const = 0;
 
+  virtual Value permute(RewriterBase &rewriter, Location loc, Value a, Value b,
+                        Value selector) const = 0;
+
   virtual Value programId(RewriterBase &rewriter, Location loc,
-                          ModuleOp moduleOp, int axis) const = 0;
+                          ModuleOp moduleOp, ProgramIDDim axis) const = 0;
 
   virtual bool warpReduce(RewriterBase &rewriter, Location loc,
                           SmallVector<Value> &acc, triton::ReduceOp op,
-                          unsigned numLaneToReduce,
-                          unsigned interleave) const = 0;
+                          unsigned reduceLaneIdMask) const = 0;
 
   virtual std::string getMulhiFuncName(Type resultElementTy) const = 0;
   // Emits LLVM code with |rewriter| to print a message following the given
@@ -70,7 +77,8 @@ public:
   // the format string global variable; |args| are the arguments to fill
   // placeholders in the format string.
   virtual void printf(RewriterBase &rewriter, Value formatStrStart,
-                      int formatStrByteCount, ValueRange args) const = 0;
+                      int formatStrByteCount, ValueRange args,
+                      ArrayRef<bool> isSigned = {}) const = 0;
 
   // Emits LLVM code with |rewriter| to print a message, particularly useful for
   // backend debug. |msg| is the message to print, |args| are the arguments to
@@ -78,8 +86,8 @@ public:
   // NOTE: This function is used for backend debug. DO NOT DELETE.
   // Example use: targetInfo.printf(rewriter,"index: %d, value: %f", {index,
   // value});
-  virtual void printf(RewriterBase &rewriter, StringRef msg,
-                      ValueRange args) const = 0;
+  virtual void printf(RewriterBase &rewriter, StringRef msg, ValueRange args,
+                      ArrayRef<bool> isSigned = {}) const = 0;
 
   // Emits LLVM code with |rewriter| to perform assertion failure with the given
   // |message| from the given |func| in |file|.
@@ -89,7 +97,33 @@ public:
 
   virtual int getSharedAddressSpace() const = 0;
 
+  virtual int getAddressSpace(Attribute addressSpace) const = 0;
+
   virtual bool supportVectorizedAtomics() const = 0;
+
+  virtual bool supportLdMatrix() const { return false; }
+  virtual bool supportStMatrix() const { return false; }
+  virtual bool supportLdStMatrixB8() const { return false; }
+  virtual bool supportBitwidth16Elementwise() const { return false; }
+  virtual bool supportBitwidth32Elementwise() const { return false; }
+
+  // Returns the preferred arity of the in-thread reduction tree for the given
+  // combiner operation. The default is 2 (binary tree). Targets that have
+  // native ternary instructions (e.g. AMD v_maximum3/v_minimum3) can return 3
+  // to generate a ternary reduction tree that maps directly to hardware.
+  virtual unsigned getReductionTreeArity(Operation *combinerOp) const {
+    return 2;
+  }
+  virtual bool isCuda() const { return false; }
+
+  // Returns the shared memory partition size in bytes. A value of 0 means
+  // shared memory is not partitioned.
+  virtual size_t getSharedMemoryPartitionSize() const { return 0; }
+
+  // Annotate target specific information to local load operations during
+  // lowering to LLVM. `llLoadOp` is the generated LLVM load op.
+  virtual void localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
+                                     Operation *llLoadOp) const {}
 
   virtual ~TargetInfoBase() {}
 };

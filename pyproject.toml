@@ -1,11 +1,13 @@
 # @EUGO_CHANGE
 [build-system]
-
 requires = [
     "scikit_build_core",
     "pybind11"
 ]
 build-backend = "scikit_build_core.build"
+
+# requires = ["setuptools>=40.8.0", "cmake>=3.20,<4.0", "ninja>=1.11.1", "pybind11>=2.13.1"]
+# build-backend = "setuptools.build_meta"
 
 
 [tool.mypy]
@@ -23,23 +25,49 @@ exclude = ["/build/"]
 follow_imports = "silent"
 
 
-# @EUGO_CHANGE
+# @EUGO_CHANGE: @begin Project metadata. Version is auto-derived from upstream's setup.py — see
+# [tool.scikit-build.metadata.version] below. We never hard-code the version in this file because
+# it drifts after every upstream merge.
 [project]
 name = "triton"
-version = "3.2.0"  # @TODO+: Keep in sync with upstream version
+dynamic = ["version"]
+# @EUGO_CHANGE: @end
 
-# @EUGO_CHANGE
+# @EUGO_CHANGE: @begin scikit-build-core base config.
+# `install.strip = false` — default is true, but we strip ourselves downstream.
+# `sdist.exclude = []` — no extra sdist exclusions on top of scikit-build-core's defaults.
 [tool.scikit-build]
 sdist.exclude = []
-install.strip = false  # Default value is `true`, but we perform stripping ourselves
+install.strip = false
+# @EUGO_CHANGE: @end
 
+# @EUGO_CHANGE: @begin Dynamic version derived from upstream's setup.py.
+# Per `__info.md` bullet 2.2, our wheel tracks upstream's bare X.Y.Z version (no git commit SHA,
+# no TRITON_WHEEL_VERSION_SUFFIX). The line we match is `setup.py:567`:
+#   TRITON_VERSION = "3.7.0" + get_triton_version_suffix()
+# The capture group `(?P<value>[0-9.]+)` greedily grabs `3.7.0` and stops at the closing quote,
+# so the `+ get_triton_version_suffix()` tail is ignored. scikit-build-core applies re.MULTILINE,
+# so the `^` anchor matches the start of any line.
+# If upstream ever deletes setup.py entirely, this will fail loudly at build time and we can
+# either point at a different source of truth or hard-code a value here.
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "setup.py"
+regex = '^TRITON_VERSION = "(?P<value>[0-9.]+)"'
+# @EUGO_CHANGE: @end
 
-# @EUGO_CHANGE
-# IMPORTANT: we need to exclude them twice. First in `CMakeLists.txt` when copying python/triton (because they are nested there), and second here in `pyproject.toml` when they are copied together with library targets.
+# @EUGO_CHANGE: @begin Wheel content shaping.
+# We exclude `triton/_C/include/**` because eugo_wrapper.cmake's `install(TARGETS triton proton)`
+# brings the public C++ headers along for the ride. We don't ship the C++ developer SDK in our
+# Python wheel (see also CMakeLists.txt — the upstream `install(DIRECTORY include/...)` blocks
+# are commented out). We need to exclude these twice: once in CMakeLists.txt when copying
+# python/triton (because they are nested there), and once here when they are copied together
+# with library targets.
 [tool.scikit-build.wheel]
 exclude = [
     "triton/_C/include/**"
 ]
+# @EUGO_CHANGE: @end
 
 
 [tool.yapf]
@@ -56,16 +84,6 @@ aggressive = 1
 ignore = "E501,E701,E731,W690,W503"
 max_line_length = 88
 
-[tool.yapfignore]
-ignore_patterns = [
-    # This exclusion is also specified in .pre-commit-config.yaml.
-    # - We put it here because if you run yapf directly, we want it to skip the
-    #   file.
-    # - We also put it in .pre-commit-config because yapf raises an error if
-    #   pre-commit runs it but all of the files it might touch are ignored!
-    "python/test/unit/language/test_line_info.py"
-]
-
 
 [tool.ruff]
 line-length = 120
@@ -73,3 +91,6 @@ line-length = 120
 
 [tool.ruff.lint]
 ignore = ["E501", "E701", "E731", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]

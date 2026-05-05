@@ -3,6 +3,7 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Support/LogicalResult.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 
@@ -25,12 +26,9 @@ int constexpr maxTensorNumElements = 1048576;
 LogicalResult verifyTensorSize(Operation *op);
 LogicalResult verifyTensorLayouts(Operation *op);
 
-LogicalResult verifySameOperandsEncoding(Operation *op,
-                                         bool allowTensorPointerType = false);
-
-LogicalResult
-verifySameOperandsAndResultEncoding(Operation *op,
-                                    bool allowTensorPointerType = false);
+LogicalResult verifySameOperandsEncoding(Operation *op);
+LogicalResult verifyEquivalentTensorType(Type typeA, Type typeB);
+LogicalResult verifySameOperandsAndResultEncoding(Operation *op);
 
 LogicalResult verifySameLoadStoreOperandsShape(Operation *op);
 
@@ -54,53 +52,6 @@ class VerifyTensorLayoutsTrait
 public:
   static LogicalResult verifyTrait(Operation *op) {
     return impl::verifyTensorLayouts(op);
-  }
-};
-
-// Verify if the op is a dot-like operation.
-// A dot-like operation should have three operands.
-// The first two operands should share a common dimension, and the result
-// should have the dimensions of the two operands that are not shared.
-// A dot-like operation can be either 2d or 3d.
-// In the 3d case, the first dimension of operands is the batch dimension.
-template <class ConcreteType>
-class DotLike : public TraitBase<ConcreteType, DotLike> {
-public:
-  static LogicalResult verifyTrait(Operation *op) {
-    if (op->getNumOperands() < 3)
-      return op->emitOpError("expected at least 3 operands");
-    auto aTy = cast<ShapedType>(op->getOperand(0).getType());
-    auto bTy = cast<ShapedType>(op->getOperand(1).getType());
-    auto cTy = cast<ShapedType>(op->getOperand(2).getType());
-    auto aShape = aTy.getShape();
-    auto bShape = bTy.getShape();
-    auto cShape = cTy.getShape();
-    // Check if all 3d or all 2d
-    if (aShape.size() != 2 && aShape.size() != 3)
-      return op->emitOpError("expected operands to be 2d or 3d");
-    if (aShape.size() != bShape.size() || aShape.size() != cShape.size())
-      return op->emitOpError("expected all operands to have the same rank");
-    // Check if the first two operands share a common dimension
-    // TODO: enable back with an interface to support scaled dot.
-    // if (aShape[aShape.size() - 1] != bShape[aShape.size() - 2])
-    //   return op->emitOpError("expected the last dimension of the first
-    //   operand "
-    //                          "to be equal to the second-to-last dimension of
-    //                          " "the second operand");
-    // Check the batch dimension
-    if (aShape.size() == 3 &&
-        (aShape[0] != cShape[0] || bShape[0] != cShape[0]))
-      return op->emitOpError("expected the first dimension of the first "
-                             "operand to be equal to the first dimension of "
-                             "the result");
-    // Check the output shape
-    if (cShape[cShape.size() - 2] != aShape[aShape.size() - 2] ||
-        cShape[cShape.size() - 1] != bShape[aShape.size() - 1])
-      return op->emitOpError(
-          "expected the output shape to be the concatenation of the last "
-          "dimension of the first operand and the last dimension of the "
-          "second ");
-    return success();
   }
 };
 
@@ -145,8 +96,7 @@ class SameLoadStoreOperandsEncoding
     : public TraitBase<ConcreteType, SameLoadStoreOperandsEncoding> {
 public:
   static LogicalResult verifyTrait(Operation *op) {
-    return impl::verifySameOperandsEncoding(op,
-                                            /*allowTensorPointerType=*/true);
+    return impl::verifySameOperandsEncoding(op);
   }
 };
 
@@ -155,10 +105,14 @@ class SameLoadStoreOperandsAndResultEncoding
     : public TraitBase<ConcreteType, SameLoadStoreOperandsAndResultEncoding> {
 public:
   static LogicalResult verifyTrait(Operation *op) {
-    return impl::verifySameOperandsAndResultEncoding(
-        op, /*allowTensorPointerType=*/true);
+    return impl::verifySameOperandsAndResultEncoding(op);
   }
 };
+
+// This trait indicates that regions in the op may execute concurrently with
+// each other.
+template <typename ConcreteType>
+struct AsyncRegions : public TraitBase<ConcreteType, AsyncRegions> {};
 
 } // namespace OpTrait
 } // namespace mlir

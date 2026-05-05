@@ -2,29 +2,54 @@
 #define PROTON_DATA_TRACE_DATA_H_
 
 #include "Data.h"
+#include <memory>
+#include <thread>
+#include <unordered_map>
 
 namespace proton {
 
 class TraceData : public Data {
 public:
-  using Data::Data;
-  virtual ~TraceData() = default;
+  TraceData(const std::string &path, ContextSource *contextSource = nullptr);
+  virtual ~TraceData();
 
-  size_t addScope(size_t scopeId, const std::string &name) override;
+  std::string toJsonString(size_t phase) const override;
 
-  void addMetric(size_t scopeId, std::shared_ptr<Metric> metric) override;
+  std::vector<uint8_t> toMsgPack(size_t phase) const override;
 
-  void addMetrics(size_t scopeId,
-                  const std::map<std::string, MetricValueType> &metrics,
-                  bool aggregable) override;
+  DataEntry addOp(size_t phase, size_t eventId,
+                  const std::vector<Context> &contexts) override;
+
+  void
+  addMetrics(size_t scopeId,
+             const std::map<std::string, MetricValueType> &metrics) override;
+
+  class Trace;
 
 protected:
-  void startOp(const Scope &scope) override final;
+  // ScopeInterface
+  void enterScope(const Scope &scope) override final;
 
-  void stopOp(const Scope &scope) override final;
+  void exitScope(const Scope &scope) override final;
 
 private:
-  void doDump(std::ostream &os, OutputFormat outputFormat) const override;
+  // Data
+  void doDump(std::ostream &os, OutputFormat outputFormat,
+              size_t phase) const override;
+
+  OutputFormat getDefaultOutputFormat() const override {
+    return OutputFormat::ChromeTrace;
+  }
+
+  void dumpChromeTrace(std::ostream &os, size_t phase) const;
+  size_t getCurrentThreadTraceId();
+
+  PhaseStore<Trace> tracePhases;
+  // ScopeId -> EventId
+  std::unordered_map<size_t, size_t> scopeIdToEventId;
+  // ThreadId -> TraceId
+  std::unordered_map<std::thread::id, uint64_t> threadIdToTraceId;
+  uint64_t nextThreadTraceId = 0;
 };
 
 } // namespace proton
