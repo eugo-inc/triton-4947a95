@@ -1,125 +1,252 @@
+#include "Dialect/NVGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
+#include "TritonNVIDIAGPUToLLVM/AtomicPTXBuilder.h"
+#include "TritonNVIDIAGPUToLLVM/PTXAsmFormat.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "triton/Analysis/Allocation.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
-
-namespace SharedToDotOperandMMAv2OrV3 {
-Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
-                    Location loc, Value tensor,
-                    DotOperandEncodingAttr bEncoding,
-                    const SharedMemoryObject &smemObj,
-                    const LLVMTypeConverter *typeConverter, Value thread);
-} // namespace SharedToDotOperandMMAv2OrV3
-
+#include "triton/Tools/LayoutUtils.h"
 namespace {
 
 using namespace mlir;
 using namespace mlir::triton;
 using namespace mlir::triton::gpu;
+using namespace mlir::triton::NVIDIA;
+using namespace mlir::LLVM::NVIDIA;
+
+bool isConstI32OneTensor(Value value) {
+  DenseElementsAttr constant;
+  return matchPattern(value, m_Constant(&constant)) &&
+         constant.getElementType().isInteger(32) &&
+         llvm::all_of(constant.getValues<APInt>(),
+                      [](const APInt &value) { return value.isOne(); });
+}
+
+struct LocalAtomicScatterAddInfo {
+  RankedTensorType valuesTy;
+  Type llvmElemTy;
+  LinearLayout regLayout;
+  ColumnAction removeBroadcast;
+  Value threadPred;
+  SmallVector<Value> values;
+  SmallVector<Value> maskValues;
+  SmallVector<Value> ptrs;
+};
+
+FailureOr<LocalAtomicScatterAddInfo>
+prepareLocalAtomicScatterAdd(triton::gpu::LocalAtomicScatterAddOp op, Value dst,
+                             Value indices, Value inputValues, Value mask,
+                             ConversionPatternRewriter &rewriter,
+                             const NVIDIA::TargetInfo &targetInfo,
+                             const LLVMTypeConverter *typeConverter) {
+  auto loc = op.getLoc();
+  auto valuesTy = cast<RankedTensorType>(op.getValues().getType());
+  auto memDescTy = cast<MemDescType>(op.getDst().getType());
+  if (isa<triton::gpu::PartitionedSharedEncodingAttr>(
+          memDescTy.getEncoding())) {
+    return failure();
+  }
+
+  auto llvmElemTy = typeConverter->convertType(memDescTy.getElementType());
+  auto smemObj =
+      LLVM::getSharedMemoryObjectFromStruct(loc, dst, llvmElemTy, rewriter);
+  SmallVector<Value> idxValues = unpackLLElements(loc, indices, rewriter);
+  SmallVector<Value> values = unpackLLElements(loc, inputValues, rewriter);
+  SmallVector<Value> maskValues;
+  if (mask)
+    maskValues = unpackLLElements(loc, mask, rewriter);
+
+  LinearLayout regLayout = toLinearLayout(valuesTy);
+  auto freeVarMasks = regLayout.getFreeVariableMasks();
+  auto removeBroadcast = actionRemoveBroadcastedRegs(regLayout);
+  Value threadPred =
+      emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
+  LinearLayout activeRegLayout = regLayout;
+  if (!removeBroadcast.isIdentity()) {
+    activeRegLayout = removeBroadcast.apply(regLayout);
+    values = removeBroadcast.apply(values);
+    idxValues = removeBroadcast.apply(idxValues);
+    if (!maskValues.empty())
+      maskValues = removeBroadcast.apply(maskValues);
+  }
+  SmallVector<SmallVector<Value>> srcIndices =
+      emitIndices(loc, rewriter, targetInfo, activeRegLayout, valuesTy,
+                  /*withCTAOffset=*/true);
+
+  SmallVector<Value> ptrs =
+      computeLocalPtrs(loc, memDescTy, smemObj, llvmElemTy, idxValues,
+                       srcIndices, op.getAxis(), rewriter);
+
+  return LocalAtomicScatterAddInfo{valuesTy,        llvmElemTy, regLayout,
+                                   removeBroadcast, threadPred, values,
+                                   maskValues,      ptrs};
+}
+
+Value emitSharedInc(ConversionPatternRewriter &rewriter, Location loc,
+                    Value ptr, bool returnOld, Value pred = Value()) {
+  PTXBuilder ptxBuilder;
+  // PTX atom/red.inc resets to 0 only when the old value reaches the bound, so
+  // using UINT32_MAX makes it equivalent to a wrapping increment-by-1.
+  auto *boundOpr = ptxBuilder.newConstantOperand("0xffffffff");
+  if (!returnOld) {
+    auto *ptrOpr = ptxBuilder.newAddrOperand(ptr, "r");
+    auto &red = *ptxBuilder.create("red");
+    red.shared().o("inc").o("u32");
+    red(ptrOpr, boundOpr).maybePredicate(pred, "b");
+    return ptxBuilder.launch(rewriter, loc, void_ty(rewriter.getContext()));
+  }
+
+  auto *dstOpr = ptxBuilder.newOperand("=r", /*init=*/true);
+  auto *ptrOpr = ptxBuilder.newAddrOperand(ptr, "r");
+  auto &atom = *ptxBuilder.create("atom");
+  atom.shared().o("inc").o("u32");
+  atom(dstOpr, ptrOpr, boundOpr).maybePredicate(pred, "b");
+  return ptxBuilder.launch(rewriter, loc, i32_ty);
+}
+
+FailureOr<Value> emitSharedAtomicAdd(ConversionPatternRewriter &rewriter,
+                                     Location loc, Type valueElemTy, Value ptr,
+                                     Value value, bool returnOld, Value pred) {
+  unsigned valueElemNBits = valueElemTy.getIntOrFloatBitWidth();
+  if (valueElemNBits != 16 && valueElemNBits != 32 && valueElemNBits != 64)
+    return failure();
+
+  std::string tyId = getPtxRegisterSizeCode(valueElemNBits, /*isFloat=*/false);
+  std::string addOp = "add";
+  std::string suffix;
+  if (isa<IntegerType>(valueElemTy)) {
+    if (valueElemNBits < 32)
+      return failure();
+    suffix = "u" + std::to_string(valueElemNBits);
+  } else if (isa<FloatType>(valueElemTy)) {
+    addOp += valueElemNBits == 16 ? ".noftz" : "";
+    suffix =
+        (valueElemTy.isBF16() ? "bf" : "f") + std::to_string(valueElemNBits);
+  } else {
+    return failure();
+  }
+
+  if (!returnOld) {
+    PTXBuilder ptxBuilder;
+    auto *ptrOpr = ptxBuilder.newAddrOperand(ptr, "r");
+    auto *valOpr = ptxBuilder.newOperand(value, tyId);
+    auto &red = *ptxBuilder.create("red");
+    red.shared().o(addOp).o(suffix);
+    red(ptrOpr, valOpr).maybePredicate(pred, "b");
+    return ptxBuilder.launch(rewriter, loc, void_ty(rewriter.getContext()));
+  }
+
+  PTXBuilder ptxBuilder;
+  auto *dstOpr = ptxBuilder.newOperand("=" + tyId, /*init=*/true);
+  auto *ptrOpr = ptxBuilder.newAddrOperand(ptr, "r");
+  auto *valOpr = ptxBuilder.newOperand(value, tyId);
+  auto &atom = *ptxBuilder.create("atom");
+  atom.shared().o(addOp).o(suffix);
+  atom(dstOpr, ptrOpr, valOpr).maybePredicate(pred, "b");
+  return ptxBuilder.launch(rewriter, loc, valueElemTy);
+}
+
+LogicalResult lowerLdStMatrix(
+    Location loc, const LinearLayout &regLayout, MemDescType memDescType,
+    SmallVector<Value> &vals, // Input for stmatrix, output for ldmatrix
+    SharedMemoryObject smemObj, ConversionPatternRewriter &rewriter,
+    const NVIDIA::TargetInfo &targetInfo,
+    const LLVMTypeConverter *typeConverter) {
+  bool isStore = !vals.empty();
+
+  // Remove broadcasting from regLayout
+  auto removeBroadcast = actionRemoveBroadcastedRegs(regLayout);
+  if (!removeBroadcast.isIdentity()) {
+    if (isStore) {
+      auto newRegLayout = removeBroadcast.apply(regLayout);
+      vals = removeBroadcast.apply(vals);
+      return lowerLdStMatrix(loc, newRegLayout, memDescType, vals, smemObj,
+                             rewriter, targetInfo, typeConverter);
+    } else {
+      auto newRegLayout = removeBroadcast.apply(regLayout);
+      auto result =
+          lowerLdStMatrix(loc, newRegLayout, memDescType, vals, smemObj,
+                          rewriter, targetInfo, typeConverter);
+      if (succeeded(result)) {
+        vals = broadcastAs(vals, regLayout);
+      }
+      return result;
+    }
+  }
+  if (isa<PaddedSharedEncodingAttr>(memDescType.getEncoding())) {
+    return failure();
+  }
+  auto memLayout = toLinearLayout(memDescType);
+  auto cvt = regLayout.invertAndCompose(memLayout);
+  auto kBlock = StringAttr::get(loc.getContext(), "block");
+  // ldmatrix/stmatrix does not support shared::cluster
+  auto maybeSublayout = cvt.quotient({kBlock});
+  if (!maybeSublayout) {
+    return failure();
+  }
+  cvt = maybeSublayout.value();
+  auto smemBase = smemObj.getBase();
+  auto affineOffset = smemObj.getShmemOffset(loc, rewriter, memDescType);
+  auto maskSpanAffineOffset = smemObj.getMaskSpanOffsets(memDescType);
+  auto llvmElemTy = typeConverter->convertType(memDescType.getElementType());
+  for (bool transpose : {false, true}) {
+    auto result = LLVM::NVIDIA::lowerLdStMatrix(
+        loc, cvt, transpose, vals, smemBase, affineOffset, maskSpanAffineOffset,
+        llvmElemTy, rewriter, targetInfo);
+    if (succeeded(result)) {
+      return result;
+    }
+  }
+  return failure();
+}
 
 struct LocalLoadOpConversion
     : public ConvertOpToLLVMPattern<triton::gpu::LocalLoadOp> {
 public:
-  using ConvertOpToLLVMPattern<
-      triton::gpu::LocalLoadOp>::ConvertOpToLLVMPattern;
+  LocalLoadOpConversion(const LLVMTypeConverter &converter,
+                        const NVIDIA::TargetInfo &targetInfo,
+                        PatternBenefit benefit = 1)
+      : ConvertOpToLLVMPattern<triton::gpu::LocalLoadOp>(converter, benefit),
+        targetInfo(targetInfo) {}
 
   LogicalResult
   matchAndRewrite(triton::gpu::LocalLoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    MemDescType srcTy = op.getSrc().getType();
+    if (!op.getSrc())
+      return failure();
+    MemDescType memDescType = op.getSrc().getType();
     RankedTensorType dstTy = op.getType();
-    Attribute srcLayout = srcTy.getEncoding();
-    Attribute dstLayout = dstTy.getEncoding();
-    if (isa<DotOperandEncodingAttr>(dstLayout) &&
-        isa<NvidiaMmaEncodingAttr>(
-            cast<DotOperandEncodingAttr>(dstLayout).getParent())) {
-      auto dot = cast<DotOperandEncodingAttr>(dstLayout);
-      auto mma = cast<NvidiaMmaEncodingAttr>(dot.getParent());
-      auto shared = cast<SharedEncodingAttr>(srcLayout);
-      auto bitwidth = dstTy.getElementTypeBitWidth();
-      auto vecWidth = 32 / bitwidth;
-      auto kWidth = dot.getKWidth();
-      auto rank = dstTy.getRank();
-      auto kOrder = dot.getOpIdx() == 0 ? rank - 1 : rank - 2;
-      auto needTrans = kOrder != shared.getOrder()[0];
-      auto canUseLdmatrix =
-          (bitwidth == 16 || (!needTrans)) && (kWidth == vecWidth);
-      if (mma.isHopper()) {
-        // I think we should be able to remove this condition, but it's here
-        // as the legacy ldmatrix path does not support it
-        canUseLdmatrix &= srcTy.getElementTypeBitWidth() * kWidth == 32;
-      }
-      // If we remove this one, ldmatrix will IMA. It can probably be relaxed
-      // though
-      canUseLdmatrix &=
-          srcTy.getShape()[0] >= 8 &&
-          srcTy.getShape()[1] >= 4 * kWidth & dstTy.getRank() <= 2;
-      if (canUseLdmatrix) {
-        return lowerSharedToDotOperand(op, adaptor, getTypeConverter(),
-                                       rewriter);
-      }
+    Type llvmElemTy = typeConverter->convertType(dstTy.getElementType());
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        op.getLoc(), adaptor.getSrc(), llvmElemTy, rewriter);
+
+    auto *typeConverter = getTypeConverter();
+    llvm::SmallVector<Value> values;
+    auto regLayout = toLinearLayout(dstTy);
+    auto result =
+        lowerLdStMatrix(op.getLoc(), regLayout, memDescType, values, smemObj,
+                        rewriter, targetInfo, getTypeConverter());
+    if (failed(result)) {
+      return failure();
     }
-    return failure();
+    auto structTy = LLVM::LLVMStructType::getLiteral(
+        op.getLoc().getContext(), SmallVector<Type>(values.size(), llvmElemTy));
+    auto value =
+        packLLElements(op.getLoc(), typeConverter, values, rewriter, structTy);
+    rewriter.replaceOp(op, value);
+    return success();
   }
 
 private:
-  // shared -> dot_operand if the result layout is mma
-  Value lowerSharedToDotOperandMMA(
-      triton::gpu::LocalLoadOp op, triton::gpu::LocalLoadOpAdaptor adaptor,
-      const LLVMTypeConverter *typeConverter,
-      ConversionPatternRewriter &rewriter,
-      const NvidiaMmaEncodingAttr &mmaLayout,
-      const DotOperandEncodingAttr &dotOperandLayout) const {
-    auto loc = op.getLoc();
-    auto src = op.getSrc();
-    auto dst = op.getResult();
-    bool isMMA = supportMMA(dst, mmaLayout.getVersionMajor());
-
-    auto llvmElemTy =
-        typeConverter->convertType(src.getType().getElementType());
-
-    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
-                                                         llvmElemTy, rewriter);
-    Value res;
-
-    if (mmaLayout.isHopper() || mmaLayout.isAmpere()) { // tensor core v2 or v3
-      if (mmaLayout.isHopper())
-        assert(dotOperandLayout.getOpIdx() == 0 &&
-               "Operand $b in MMAv3 can only be in shared memory");
-
-      res = SharedToDotOperandMMAv2OrV3::convertLayout(
-          dotOperandLayout.getOpIdx(), rewriter, loc, src, dotOperandLayout,
-          smemObj, typeConverter, getThreadId(rewriter, loc));
-    } else {
-      assert(false && "Unsupported mma layout found");
-    }
-    return res;
-  };
-
-  // shared -> mma_operand
-  LogicalResult
-  lowerSharedToDotOperand(triton::gpu::LocalLoadOp op,
-                          triton::gpu::LocalLoadOpAdaptor adaptor,
-                          const LLVMTypeConverter *typeConverter,
-                          ConversionPatternRewriter &rewriter) const {
-    auto loc = op.getLoc();
-    auto dstEnc = cast<DotOperandEncodingAttr>(op.getType().getEncoding());
-    auto sharedLayout =
-        cast<SharedEncodingAttr>(op.getSrc().getType().getEncoding());
-
-    auto mmaLayout = cast<NvidiaMmaEncodingAttr>(dstEnc.getParent());
-    Value res = lowerSharedToDotOperandMMA(op, adaptor, typeConverter, rewriter,
-                                           mmaLayout, dstEnc);
-
-    rewriter.replaceOp(op, res);
-    return success();
-  }
+  const NVIDIA::TargetInfo &targetInfo;
 };
 
 struct LocalAllocOpConversion
@@ -135,79 +262,126 @@ struct LocalAllocOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     if (!op.getSrc())
       return failure();
-    auto mmaEncoding = dyn_cast<triton::gpu::NvidiaMmaEncodingAttr>(
-        op.getSrc().getType().getEncoding());
-    if (!mmaEncoding)
-      return failure();
-    auto sharedLayout =
-        cast<triton::gpu::SharedEncodingAttr>(op.getType().getEncoding());
-    if (!sharedLayout.getHasLeadingOffset())
-      return failure();
-    int swizzleByteSize = 0;
-    if (sharedLayout.getPerPhase() == 4 && sharedLayout.getMaxPhase() == 2)
-      swizzleByteSize = 32;
-    else if (sharedLayout.getPerPhase() == 2 && sharedLayout.getMaxPhase() == 4)
-      swizzleByteSize = 64;
-    else if (sharedLayout.getPerPhase() == 1 && sharedLayout.getMaxPhase() == 8)
-      swizzleByteSize = 128;
-    else
-      return failure();
+    MemDescType memDescType = op.getType();
+    RankedTensorType regTy = op.getSrc().getType();
+    Type llvmElemTy = typeConverter->convertType(regTy.getElementType());
+    Value smemBase =
+        LLVM::getSharedMemoryBase(op.getLoc(), rewriter, targetInfo, op);
+    auto smemObj = SharedMemoryObject(
+        smemBase, llvmElemTy, memDescType.getRank(), op.getLoc(), rewriter);
 
-    auto *ctx = rewriter.getContext();
-    Location loc = op->getLoc();
-
-    RankedTensorType srcTy = op.getSrc().getType();
-    SmallVector<unsigned> shape =
-        convertType<unsigned, int64_t>(srcTy.getShape());
-    auto order = sharedLayout.getOrder();
-    if (!targetInfo.canUseStMatrix(srcTy, shape, shape, order,
-                                   swizzleByteSize)) {
+    auto regLayout = toLinearLayout(regTy);
+    auto values = unpackLLElements(op.getLoc(), adaptor.getSrc(), rewriter);
+    auto result =
+        lowerLdStMatrix(op.getLoc(), regLayout, memDescType, values, smemObj,
+                        rewriter, targetInfo, getTypeConverter());
+    if (failed(result)) {
       return failure();
     }
-    auto layout = chooseStMatrixLayout(rewriter.getContext(), srcTy, shape,
-                                       shape, order, swizzleByteSize);
-    Value smemBase = LLVM::getSharedMemoryBase(loc, rewriter, targetInfo, op);
-    auto smemPtrTy = ptr_ty(ctx, 3);
 
-    auto kRegister = str_attr("register");
-    auto kLane = str_attr("lane");
-    auto kWarp = str_attr("warp");
-    auto kBlock = str_attr("block");
-
-    Value threadId = getThreadId(rewriter, loc);
-    Value threadsPerWarp = i32_val(layout.getInDimSize(kLane));
-    Value laneId = urem(threadId, threadsPerWarp);
-    Value warpId = udiv(threadId, threadsPerWarp);
-
-    auto regBase = applyLinearLayout(loc, rewriter, layout,
-                                     {{kRegister, i32_val(0)},
-                                      {kLane, laneId},
-                                      {kWarp, warpId},
-                                      {kBlock, i32_val(0)}})[0]
-                       .second;
-    auto srcVals = unpackLLElements(loc, adaptor.getSrc(), rewriter);
-    auto srcVec = layout.getNumConsecutiveInOut();
-    Type llvmElemTy = typeConverter->convertType(srcTy.getElementType());
-    for (int i = 0; i < srcVals.size(); i += srcVec) {
-      auto regIdx =
-          layout.apply({{kRegister, i}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}})[0]
-              .second;
-      Value offset = xor_(regBase, i32_val(regIdx));
-      auto vecAddr = gep(smemPtrTy, llvmElemTy, smemBase, offset);
-      vecAddr.setInbounds(true);
-      SmallVector<Value> inValsVec;
-      for (int j = 0; j < srcVec; j++)
-        inValsVec.push_back(srcVals[i + j]);
-      Value valsVec = packLLVector(loc, inValsVec, rewriter);
-      targetInfo.storeMatrixShared(rewriter, loc, vecAddr, valsVec);
-    }
-
-    auto resultTy = cast<MemDescType>(op.getType());
-    auto shapePerCTA = getShapePerCTA(sharedLayout, resultTy.getShape());
-    auto smemObj = SharedMemoryObject(smemBase, llvmElemTy, shapePerCTA,
-                                      sharedLayout, loc, rewriter);
-    auto retVal = getStructFromSharedMemoryObject(loc, smemObj, rewriter);
+    auto retVal =
+        getStructFromSharedMemoryObject(op.getLoc(), smemObj, rewriter);
     rewriter.replaceOp(op, retVal);
+    return success();
+  }
+
+private:
+  const NVIDIA::TargetInfo &targetInfo;
+};
+
+struct LocalStoreOpConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::LocalStoreOp> {
+  LocalStoreOpConversion(const LLVMTypeConverter &converter,
+                         const NVIDIA::TargetInfo &targetInfo,
+                         PatternBenefit benefit = 1)
+      : ConvertOpToLLVMPattern<triton::gpu::LocalStoreOp>(converter, benefit),
+        targetInfo(targetInfo) {}
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::LocalStoreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    MemDescType memDescType = op.getDst().getType();
+    RankedTensorType srcTy = op.getSrc().getType();
+    Type llvmElemTy = typeConverter->convertType(srcTy.getElementType());
+    SharedMemoryObject smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        op.getLoc(), adaptor.getDst(), llvmElemTy, rewriter);
+
+    auto regLayout = toLinearLayout(srcTy);
+    auto values = unpackLLElements(op.getLoc(), adaptor.getSrc(), rewriter);
+    auto result =
+        lowerLdStMatrix(op.getLoc(), regLayout, memDescType, values, smemObj,
+                        rewriter, targetInfo, getTypeConverter());
+    if (failed(result)) {
+      return failure();
+    }
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+private:
+  const NVIDIA::TargetInfo &targetInfo;
+};
+
+struct LocalAtomicScatterAddOpConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::LocalAtomicScatterAddOp> {
+public:
+  LocalAtomicScatterAddOpConversion(const LLVMTypeConverter &converter,
+                                    const NVIDIA::TargetInfo &targetInfo,
+                                    PatternBenefit benefit = 1)
+      : ConvertOpToLLVMPattern<triton::gpu::LocalAtomicScatterAddOp>(converter,
+                                                                     benefit),
+        targetInfo(targetInfo) {}
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::LocalAtomicScatterAddOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto lowering = prepareLocalAtomicScatterAdd(
+        op, adaptor.getDst(), adaptor.getIndices(), adaptor.getValues(),
+        op.getMask() ? adaptor.getMask() : Value(), rewriter, targetInfo,
+        getTypeConverter());
+    if (failed(lowering))
+      return failure();
+    LocalAtomicScatterAddInfo &info = *lowering;
+
+    bool isI32Inc = info.valuesTy.getElementType().isInteger(32) &&
+                    isConstI32OneTensor(op.getValues());
+    bool returnOld = !op.getResult().use_empty();
+
+    SmallVector<Value> results;
+    if (returnOld)
+      results.reserve(info.ptrs.size());
+    for (auto [i, ptrAndValue] :
+         llvm::enumerate(llvm::zip(info.ptrs, info.values))) {
+      auto [ptr, value] = ptrAndValue;
+      Value pred =
+          maybeAnd(rewriter, loc, info.threadPred,
+                   info.maskValues.empty() ? Value() : info.maskValues[i]);
+      if (isI32Inc) {
+        Value result = emitSharedInc(rewriter, loc, ptr, returnOld, pred);
+        if (returnOld)
+          results.push_back(result);
+        continue;
+      }
+      auto old = emitSharedAtomicAdd(rewriter, loc, info.llvmElemTy, ptr, value,
+                                     returnOld, pred);
+      if (failed(old))
+        return failure();
+      if (returnOld)
+        results.push_back(*old);
+    }
+
+    if (!returnOld) {
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    if (!info.removeBroadcast.isIdentity())
+      results = broadcastAs(results, info.regLayout);
+    finalizeTensorAtomicResults(op, info.valuesTy, rewriter, results,
+                                info.llvmElemTy, b, info.threadPred, targetInfo,
+                                getTypeConverter());
     return success();
   }
 
@@ -222,7 +396,12 @@ void mlir::triton::NVIDIA::populateMemoryOpToLLVMPatterns(
   // Backend optimized memory ops get higher benefit
   patterns.add<LocalAllocOpConversion>(typeConverter, targetInfo,
                                        benefit.getBenefit() + 1);
-  patterns.add<LocalLoadOpConversion>(typeConverter, benefit.getBenefit() + 1);
+  patterns.add<LocalStoreOpConversion>(typeConverter, targetInfo,
+                                       benefit.getBenefit() + 1);
+  patterns.add<LocalAtomicScatterAddOpConversion>(typeConverter, targetInfo,
+                                                  benefit.getBenefit() + 1);
+  patterns.add<LocalLoadOpConversion>(typeConverter, targetInfo,
+                                      benefit.getBenefit() + 1);
   mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo,
                                                patterns, benefit);
 }

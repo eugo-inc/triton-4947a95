@@ -1,7 +1,19 @@
 add_triton_library(TritonNvidiaGPUTransforms
+  ClusterBarrierInsertion.cpp
+  CheckMatmulTwoCTAs.cpp
+  ConSanNVIDIA.cpp
   FenceInsertion.cpp
+  InterleaveTMem.cpp
+  MMALowering.cpp
+  OptimizeDescriptorEncoding.cpp
+  OptimizeTMemLayouts.cpp
   PlanCTA.cpp
+  PromoteLHSToTMem.cpp
+  ProxyFenceInsertion.cpp
+  RemoveTMEMTokens.cpp
+  TensorMemoryAllocation.cpp
   TMALowering.cpp
+  TMAUtilities.cpp
 
   DEPENDS
   TritonNvidiaGPUTransformsIncGen
@@ -11,5 +23,7 @@ add_triton_library(TritonNvidiaGPUTransforms
   TritonGPUIR
   TritonGPUTransforms
   TritonNvidiaGPUIR
+  TritonInstrumentTransforms
+  TritonInstrumentIR
   MLIRTransformUtils
 )

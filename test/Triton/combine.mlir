@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file -canonicalize -triton-combine | FileCheck %s
+// RUN: triton-opt %s -canonicalize -triton-combine | FileCheck %s
 
 // We don't combine if the dot result is used by more than one op.
 // CHECK-LABEL: @test_combine_dot_add_invalid_pattern
@@ -39,6 +39,30 @@ tt.func @test_combine_dot_add_pattern() -> (tensor<128x128xf32>) {
     // CHECK-NEXT: tt.return %[[res]] : tensor<128x128xf32>
     %res = arith.addf %dot_out, %d : tensor<128x128xf32>
 
+    tt.return %res : tensor<128x128xf32>
+}
+
+
+// CHECK-LABEL: @test_combine_scale_dot_add_pattern
+tt.func @test_combine_scale_dot_add_pattern() -> (tensor<128x128xf32>) {
+    // CHECK-DAG: %[[a:.*]] = arith.constant dense<1.000000e+00> : tensor<128x128xf8E5M2>
+    // CHECK-DAG: %[[sa:.*]] = arith.constant dense<1> : tensor<128x4xi8>
+    // CHECK-DAG: %[[b:.*]] = arith.constant dense<2.000000e+00> : tensor<128x128xf8E5M2>
+    // CHECK-DAG: %[[sb:.*]] = arith.constant dense<2> : tensor<128x4xi8>
+    // CHECK-DAG: %[[d:.*]] = arith.constant dense<3.000000e+00> : tensor<128x128xf32>
+    %a = arith.constant dense<1.0> : tensor<128x128xf8E5M2>
+    %sa = arith.constant dense<1> : tensor<128x4xi8>
+    %b = arith.constant dense<2.0> : tensor<128x128xf8E5M2>
+    %sb = arith.constant dense<2> : tensor<128x4xi8>
+    %zero = arith.constant dense<0.0> : tensor<128x128xf32>
+    %d = arith.constant dense<3.0> : tensor<128x128xf32>
+
+    %dot_out = tt.dot_scaled %a scale %sa, %b scale %sb, %zero lhs = e5m2 rhs = e5m2 {fastMath = false}
+      : tensor<128x128xf8E5M2>, tensor<128x4xi8> * tensor<128x128xf8E5M2>, tensor<128x4xi8> -> tensor<128x128xf32>
+
+    // CHECK-NEXT: %[[res:.*]] = tt.dot_scaled %[[a]] scale %[[sa]], %[[b]] scale %[[sb]], %[[d]] lhs = e5m2 rhs = e5m2 {fastMath = false} : tensor<128x128xf8E5M2>, tensor<128x4xi8> * tensor<128x128xf8E5M2>, tensor<128x4xi8> -> tensor<128x128xf32>
+    // CHECK-NEXT: tt.return %[[res]] : tensor<128x128xf32>
+    %res = arith.addf %dot_out, %d : tensor<128x128xf32>
     tt.return %res : tensor<128x128xf32>
 }
 
@@ -84,6 +108,29 @@ tt.func @test_combine_addptr_pattern(%base: !tt.ptr<f32>) -> tensor<8x!tt.ptr<f3
     tt.return %ptr1 : tensor<8x!tt.ptr<f32>>
 }
 
+// CHECK-LABEL: @test_combine_addptr_pattern_discardableattrs
+tt.func @test_combine_addptr_pattern_discardableattrs(%base: !tt.ptr<f32>) -> !tt.ptr<f32> {
+    %off0 = arith.constant 8 : i32
+    %off1 = arith.constant 4 : i32
+    // CHECK-NEXT: %[[cst:.*]] = arith.constant 12 : i32
+    // CHECK-NEXT: %0 = tt.addptr %{{.*}}, %[[cst]] {tt.constancy = 8 : i32, tt.contiguity = 512 : i32, tt.divisibility = 16 : i32} : !tt.ptr<f32>, i32
+    %ptr0 = tt.addptr %base, %off0 : !tt.ptr<f32>, i32
+    %ptr1 = tt.addptr %ptr0, %off1 {tt.divisibility = 16 : i32, tt.constancy = 8 : i32, tt.contiguity = 512 : i32} : !tt.ptr<f32>, i32
+
+    tt.return %ptr1 : !tt.ptr<f32>
+}
+
+// CHECK-LABEL: @test_combine_addptr_pattern_discardableattrs_disallowed
+tt.func @test_combine_addptr_pattern_discardableattrs_disallowed(%base: !tt.ptr<f32>) -> !tt.ptr<f32> {
+    %off0 = arith.constant 8 : i32
+    %off1 = arith.constant 4 : i32
+    // CHECK-NEXT: %[[cst:.*]] = arith.constant 12 : i32
+    // CHECK-NEXT: %0 = tt.addptr %{{.*}}, %[[cst]] {tt.divisibility = 16 : i32} : !tt.ptr<f32>, i32
+    %ptr0 = tt.addptr %base, %off0 : !tt.ptr<f32>, i32
+    %ptr1 = tt.addptr %ptr0, %off1 {tt.divisibility = 16 : i32, tt.disallowed = 8 : i32} : !tt.ptr<f32>, i32
+
+    tt.return %ptr1 : !tt.ptr<f32>
+}
 // CHECK-LABEL: @test_combine_addptr_pattern_i64
 tt.func @test_combine_addptr_pattern_i64(%base: !tt.ptr<f32>) -> tensor<8x!tt.ptr<f32>> {
     %off0 = arith.constant 10 : i64
@@ -279,9 +326,8 @@ tt.func @test_canonicalize_expand_dims(%arg0: tensor<f32>, %arg1: tensor<1xf32>)
     tt.return %ed, %bc2 : tensor<1x8xf32>, tensor<8x8xf32>
 }
 
-
 // CHECK-LABEL: @test_canonicalize_view
-tt.func @test_canonicalize_view(%arg0: tensor<8xf32>, %arg1: tensor<f32>) -> (tensor<4x2xf32>, tensor<2x2x2xf32>, tensor<8xf32>) {
+tt.func @test_canonicalize_view(%arg0: tensor<8xf32>, %arg1: tensor<f32>) -> (tensor<4x2xf32>, tensor<2x2x2xf32>, tensor<8xf32>, tensor<2x2x2xf32>) {
     %view0 = tt.reshape %arg0 allow_reorder : tensor<8xf32> -> tensor<2x4xf32>
     // CHECK: %{{.*}} = tt.reshape %arg0 allow_reorder : tensor<8xf32> -> tensor<4x2xf32>
     %view1 = tt.reshape %view0 allow_reorder : tensor<2x4xf32> -> tensor<4x2xf32>
@@ -290,11 +336,34 @@ tt.func @test_canonicalize_view(%arg0: tensor<8xf32>, %arg1: tensor<f32>) -> (te
     // CHECK: %{{.*}} = tt.splat %arg1 : tensor<f32> -> tensor<2x2x2xf32>
     %view2 = tt.reshape %splat allow_reorder : tensor<8xf32> -> tensor<2x2x2xf32>
 
-    %view3 = tt.reshape %arg0 allow_reorder : tensor<8xf32> -> tensor<8xf32>
+    %view3 = tt.reshape %arg0 : tensor<8xf32> -> tensor<8xf32>
     // CHECK: %{{.*}} = arith.addf %arg0, %arg0 : tensor<8xf32>
     %add = arith.addf %view3, %arg0 : tensor<8xf32>
 
-    tt.return %view1, %view2, %add : tensor<4x2xf32>, tensor<2x2x2xf32>, tensor<8xf32>
+    // CHECK: %{{.*}} = tt.reshape %arg0 allow_reorder : tensor<8xf32> -> tensor<2x2x2xf32>
+    %reshape = tt.reshape %view0 : tensor<2x4xf32> -> tensor<2x2x2xf32>
+
+    tt.return %view1, %view2, %add, %reshape : tensor<4x2xf32>, tensor<2x2x2xf32>, tensor<8xf32>, tensor<2x2x2xf32>
+}
+
+// CHECK-LABEL: @test_canonicalize_reshape
+tt.func @test_canonicalize_reshape(%arg0: tensor<8xf32>, %arg1: tensor<f32>) -> (tensor<4x2xf32>, tensor<2x2x2xf32>, tensor<8xf32>, tensor<2x2x2xf32>) {
+    %reshape0 = tt.reshape %arg0 : tensor<8xf32> -> tensor<2x4xf32>
+    // CHECK: %{{.*}} = tt.reshape %arg0 : tensor<8xf32> -> tensor<4x2xf32>
+    %reshape1 = tt.reshape %reshape0 : tensor<2x4xf32> -> tensor<4x2xf32>
+
+    %splat = tt.splat %arg1 : tensor<f32> -> tensor<8xf32>
+    // CHECK: %{{.*}} = tt.splat %arg1 : tensor<f32> -> tensor<2x2x2xf32>
+    %reshape2 = tt.reshape %splat : tensor<8xf32> -> tensor<2x2x2xf32>
+
+    %reshape3 = tt.reshape %arg0 : tensor<8xf32> -> tensor<8xf32>
+    // CHECK: %{{.*}} = arith.addf %arg0, %arg0 : tensor<8xf32>
+    %add = arith.addf %reshape3, %arg0 : tensor<8xf32>
+
+    // CHECK: %{{.*}} = tt.reshape %arg0 allow_reorder : tensor<8xf32> -> tensor<2x2x2xf32>
+    %view = tt.reshape %reshape0 allow_reorder : tensor<2x4xf32> -> tensor<2x2x2xf32>
+
+    tt.return %reshape1, %reshape2, %add, %view : tensor<4x2xf32>, tensor<2x2x2xf32>, tensor<8xf32>, tensor<2x2x2xf32>
 }
 
 // CHECK-LABEL: @test_canonicalize_broadcast
@@ -344,4 +413,81 @@ tt.func @test_nested_transpose(%arg0: tensor<2x4x8xf32>) -> (tensor<8x2x4xf32>) 
     // CHECK: %[[res:.*]] = tt.trans %arg0 {order = array<i32: 2, 0, 1>}
     // CHECK: tt.return %[[res]]
     tt.return %b : tensor<8x2x4xf32>
+}
+
+// CHECK-LABEL: test_reshape_reduce
+tt.func @test_reshape_reduce(%0: tensor<32x4x2xi32>) -> (i32, tensor<16xi32>) {
+  // CHECK: tt.reshape %{{.+}} allow_reorder : tensor<32x4x2xi32> -> tensor<256xi32>
+  %1 = tt.reshape %0 : tensor<32x4x2xi32> -> tensor<256xi32>
+  %2 = "tt.reduce" (%1) ({
+    ^bb0(%arg7: i32, %arg8: i32):
+      %add = arith.addi %arg7, %arg8 : i32
+      tt.reduce.return %add : i32
+    }) {axis = 0 : i32} : (tensor<256xi32>) -> i32
+  %3 = tt.histogram %1 : tensor<256xi32> -> tensor<16xi32>
+  tt.return %2, %3 : i32, tensor<16xi32>
+}
+
+// CHECK-LABEL: test_rank_reduce_desc_load
+tt.func @test_rank_reduce_desc_load(%0: !tt.tensordesc<1x128x64xf16>) -> (tensor<128x64xf16>) {
+  %c0 = arith.constant 0 : i32
+  // CHECK: %[[R:.+]] = tt.descriptor_load {{.*}} : !tt.tensordesc<1x128x64xf16> -> tensor<128x64xf16>
+  // CHECK: tt.return %[[R]]
+  %l = tt.descriptor_load %0[%c0, %c0, %c0] : !tt.tensordesc<1x128x64xf16> -> tensor<1x128x64xf16>
+  %r = tt.reshape %l : tensor<1x128x64xf16> -> tensor<128x64xf16>
+  tt.return %r :  tensor<128x64xf16>
+}
+
+// CHECK-LABEL: @test_combine_dot_add_no_fold_when_imprecise_allowed
+tt.func @test_combine_dot_add_no_fold_when_imprecise_allowed() -> (tensor<128x128xf32>) {
+    // CHECK-DAG: %[[D:.*]] = arith.constant dense<3.000000e+00> : tensor<128x128xf32>
+    %a    = arith.constant dense<1.0> : tensor<128x128xf32>
+    %b    = arith.constant dense<2.0> : tensor<128x128xf32>
+    %zero = arith.constant dense<0.0> : tensor<128x128xf32>
+    %d    = arith.constant dense<3.0> : tensor<128x128xf32>
+
+    %dot_out = tt.dot %a, %b, %zero {maxNumImpreciseAcc = 1 : i32}
+               : tensor<128x128xf32> * tensor<128x128xf32> -> tensor<128x128xf32>
+
+    // CHECK: arith.addf %{{.*}}, %[[D]] : tensor<128x128xf32>
+    // CHECK-NEXT: tt.return %{{.*}} : tensor<128x128xf32>
+    %res = arith.addf %dot_out, %d : tensor<128x128xf32>
+    tt.return %res : tensor<128x128xf32>
+}
+
+// CHECK-LABEL: @test_combine_dot_add_fold_when_precise_required
+tt.func @test_combine_dot_add_fold_when_precise_required() -> (tensor<128x128xf32>) {
+    // CHECK-DAG: %[[D:.*]] = arith.constant dense<3.000000e+00> : tensor<128x128xf32>
+    // CHECK-DAG: %[[B:.*]] = arith.constant dense<2.000000e+00> : tensor<128x128xf32>
+    // CHECK-DAG: %[[A:.*]] = arith.constant dense<1.000000e+00> : tensor<128x128xf32>
+    %a    = arith.constant dense<1.0> : tensor<128x128xf32>
+    %b    = arith.constant dense<2.0> : tensor<128x128xf32>
+    %zero = arith.constant dense<0.0> : tensor<128x128xf32>
+    %d    = arith.constant dense<3.0> : tensor<128x128xf32>
+
+    %dot_out = tt.dot %a, %b, %zero {maxNumImpreciseAcc = 0 : i32}
+               : tensor<128x128xf32> * tensor<128x128xf32> -> tensor<128x128xf32>
+
+    // CHECK-NEXT: %[[RES:.*]] = tt.dot %[[A]], %[[B]], %[[D]] : tensor<128x128xf32> * tensor<128x128xf32> -> tensor<128x128xf32>
+    // CHECK-NEXT: tt.return %[[RES]] : tensor<128x128xf32>
+    %res = arith.addf %dot_out, %d : tensor<128x128xf32>
+    tt.return %res : tensor<128x128xf32>
+}
+
+// CHECK-LABEL: @test_combine_broadcast_mul_reduce
+tt.func @test_combine_broadcast_mul_reduce(%arg0: tensor<32x16xf32>, %arg1: tensor<16x32xf32>) -> tensor<32x32xf32> {
+    // CHECK: %[[CST:.*]] = arith.constant dense<0.000000e+00> : tensor<32x32xf32>
+    // CHECK: %[[RES:.*]] = tt.dot %{{.*}}, %{{.*}}, %[[CST]] : tensor<32x16xf32> * tensor<16x32xf32> -> tensor<32x32xf32>
+    // CHECK: tt.return %[[RES]] : tensor<32x32xf32>
+    %0 = tt.expand_dims %arg0 {axis = 2 : i32} : tensor<32x16xf32> -> tensor<32x16x1xf32>
+    %1 = tt.broadcast %0 : tensor<32x16x1xf32> -> tensor<32x16x32xf32>
+    %2 = tt.expand_dims %arg1 {axis = 0 : i32} : tensor<16x32xf32> -> tensor<1x16x32xf32>
+    %3 = tt.broadcast %2 : tensor<1x16x32xf32> -> tensor<32x16x32xf32>
+    %4 = arith.mulf %1, %3 : tensor<32x16x32xf32>
+    %5 = "tt.reduce"(%4) <{axis = 1 : i32}> ({
+    ^bb0(%arg2: f32, %arg3: f32):
+        %6 = arith.addf %arg2, %arg3 : f32
+        tt.reduce.return %6 : f32
+    }) : (tensor<32x16x32xf32>) -> tensor<32x32xf32>
+    tt.return %5 : tensor<32x32xf32>
 }

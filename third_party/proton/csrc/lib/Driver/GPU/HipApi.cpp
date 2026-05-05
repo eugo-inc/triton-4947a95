@@ -1,12 +1,13 @@
-// #include "Driver/GPU/HipApi.h" // @EUGO_CHANGE - no HIP support
-// #include "Driver/Dispatch.h" // @EUGO_CHANGE - no HIP support
-// #include "hip/hip_runtime_api.h" // @EUGO_CHANGE - no HIP support
+// @EUGO_CHANGE: @begin - no AMD support
+// #include "Driver/GPU/HipApi.h"
+// #include "Driver/Dispatch.h"
+// #include "hip/hip_runtime_api.h"
 // #include <string>
-
+// 
 // namespace proton {
-
+// 
 // namespace hip {
-
+// 
 // struct ExternLibHip : public ExternLibBase {
 //   using RetType = hipError_t;
 //   static constexpr const char *name = "libamdhip64.so";
@@ -14,19 +15,57 @@
 //   static constexpr RetType success = hipSuccess;
 //   static void *lib;
 // };
-
+// 
 // void *ExternLibHip::lib = nullptr;
-
+// 
+// DEFINE_DISPATCH(ExternLibHip, launchKernel, hipModuleLaunchKernel,
+//                 hipFunction_t, unsigned int, unsigned int, unsigned int,
+//                 unsigned int, unsigned int, unsigned int, unsigned int,
+//                 hipStream_t, void **, void **)
+// 
 // DEFINE_DISPATCH(ExternLibHip, deviceSynchronize, hipDeviceSynchronize)
-
+// 
 // DEFINE_DISPATCH(ExternLibHip, deviceGetAttribute, hipDeviceGetAttribute, int *,
 //                 hipDeviceAttribute_t, int);
-
+// 
 // DEFINE_DISPATCH(ExternLibHip, getDeviceCount, hipGetDeviceCount, int *);
-
+// 
 // DEFINE_DISPATCH(ExternLibHip, getDeviceProperties, hipGetDeviceProperties,
 //                 hipDeviceProp_t *, int);
-
+// 
+// DEFINE_DISPATCH(ExternLibHip, memAllocHost, hipMemAllocHost, void **, size_t)
+// 
+// DEFINE_DISPATCH(ExternLibHip, memHostAlloc, hipHostAlloc, void **, size_t,
+//                 unsigned int)
+// 
+// DEFINE_DISPATCH(ExternLibHip, memFreeHost, hipFreeHost, void *)
+// 
+// DEFINE_DISPATCH(ExternLibHip, memHostGetDevicePointer, hipHostGetDevicePointer,
+//                 hipDeviceptr_t *, void *, unsigned int)
+// 
+// DEFINE_DISPATCH(ExternLibHip, memAlloc, hipMemAlloc, hipDeviceptr_t *, size_t)
+// 
+// DEFINE_DISPATCH(ExternLibHip, memFree, hipFree, hipDeviceptr_t)
+// 
+// DEFINE_DISPATCH(ExternLibHip, memsetD32Async, hipMemsetD32Async, hipDeviceptr_t,
+//                 int, size_t, hipStream_t)
+// 
+// DEFINE_DISPATCH(ExternLibHip, ctxGetDevice, hipCtxGetDevice, hipDevice_t *)
+// 
+// DEFINE_DISPATCH(ExternLibHip, ctxGetStreamPriorityRange,
+//                 hipDeviceGetStreamPriorityRange, int *, int *)
+// 
+// DEFINE_DISPATCH(ExternLibHip, streamCreateWithPriority,
+//                 hipStreamCreateWithPriority, hipStream_t *, unsigned int, int)
+// 
+// DEFINE_DISPATCH(ExternLibHip, streamSynchronize, hipStreamSynchronize,
+//                 hipStream_t)
+// 
+// DEFINE_DISPATCH(ExternLibHip, streamDestroy, hipStreamDestroy, hipStream_t)
+// 
+// DEFINE_DISPATCH(ExternLibHip, memcpyDToHAsync, hipMemcpyDtoHAsync, void *,
+//                 hipDeviceptr_t, size_t, hipStream_t)
+// 
 // Device getDevice(uint64_t index) {
 //   int clockRate;
 //   (void)hip::deviceGetAttribute<true>(&clockRate, hipDeviceAttributeClockRate,
@@ -40,13 +79,13 @@
 //   int smCount;
 //   (void)hip::deviceGetAttribute<true>(
 //       &smCount, hipDeviceAttributeMultiprocessorCount, index);
-
+// 
 //   std::string arch = getHipArchName(index);
-
+// 
 //   return Device(DeviceType::HIP, index, clockRate, memoryClockRate, busWidth,
 //                 smCount, arch);
 // }
-
+// 
 // // TODO: hipDeviceProp_t was updated to point from hipDeviceProp_tR0000 ->
 // // hipDeviceProp_tR0600 as part of a breaking API change in Rocm 6.0
 // // https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/driver.c
@@ -56,7 +95,7 @@
 // // hipDeviceProp_tR0000 here with Rocm 6.1 causes a stack corruption. Therefore
 // // were will use hipDeviceProp_t and investigate if we can unify the definitions
 // // in the two files.
-
+// 
 // const std::string getHipArchName(uint64_t index) {
 //   hipDeviceProp_t devProp;
 //   (void)hip::getDeviceProperties<true>(&devProp, index);
@@ -64,7 +103,7 @@
 //   std::string hipArch = gcnArchName.substr(0, 6);
 //   return hipArch;
 // }
-
+// 
 // const char *getKernelNameRef(const hipFunction_t f) {
 //   typedef const char *(*hipKernelNameRef_t)(const hipFunction_t);
 //   static hipKernelNameRef_t func = nullptr;
@@ -74,7 +113,7 @@
 //         dlsym(ExternLibHip::lib, "hipKernelNameRef"));
 //   return (func ? func(f) : NULL);
 // }
-
+// 
 // const char *getKernelNameRefByPtr(const void *hostFunction,
 //                                   hipStream_t stream) {
 //   typedef const char *(*hipKernelNameRefByPtr_t)(const void *, hipStream_t);
@@ -85,7 +124,8 @@
 //         dlsym(ExternLibHip::lib, "hipKernelNameRefByPtr"));
 //   return (func ? func(hostFunction, stream) : NULL);
 // }
-
+// 
 // } // namespace hip
-
+// 
 // } // namespace proton
+// @EUGO_CHANGE: @end - no AMD support

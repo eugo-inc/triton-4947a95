@@ -22,7 +22,7 @@ using namespace mlir;
 // clang-format off
 // Example usage:
 //
-// triton-tensor-layout -l "#ttg.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [8, 1], CTAsPerCGA = [1, 1], CTASplitNum = [1, 1], CTAOrder = [1, 0], instrShape = [16, 256, 32]}>" -t "tensor<128x256xf16>"
+// triton-tensor-layout -l "#ttg.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [8, 1], instrShape = [16, 256, 32]}>" -t "tensor<128x256xf16>"
 //
 // triton-tensor-layout -i input.mlir -t "tensor<1x128x128xf16>" -o output.txt
 //
@@ -39,29 +39,32 @@ using namespace mlir;
 // CLI options
 //===--------------------------------------------------------------------===//
 
-cl::OptionCategory PrinterCategory("Available Print Options",
-                                   "Options for the tensor layout printing.");
+static cl::OptionCategory &getPrinterCategory() {
+  static cl::OptionCategory PrinterCategory(
+      "Available Print Options", "Options for the tensor layout printing.");
+  return PrinterCategory;
+}
 
 static cl::opt<std::string> InputFile(
     "i", cl::desc("File that contains the tensor data layout attributes"),
-    cl::init(""), cl::value_desc("filename"), cl::cat(PrinterCategory));
+    cl::init(""), cl::value_desc("filename"), cl::cat(getPrinterCategory()));
 
 static cl::opt<std::string>
     OutputFile("o", cl::desc("Output file to write the layout into"),
                cl::init(""), cl::value_desc("filename"),
-               cl::cat(PrinterCategory));
+               cl::cat(getPrinterCategory()));
 
 static cl::opt<std::string>
     DataLayoutStr("l", cl::desc("Tensor data layout attribute in string"),
                   cl::value_desc("layout-string"), cl::init(""),
-                  cl::cat(PrinterCategory));
+                  cl::cat(getPrinterCategory()));
 
 static cl::list<std::string>
     AliasName("alias-names",
               cl::desc("A list of alias names (separated by comma) of the "
                        "layout attributes in the input file"),
               cl::value_desc("name1,name2,name3,..."), cl::CommaSeparated,
-              cl::ZeroOrMore, cl::cat(PrinterCategory));
+              cl::ZeroOrMore, cl::cat(getPrinterCategory()));
 
 static cl::opt<bool> UseHWPointOfView(
     "use-hw-view",
@@ -69,22 +72,22 @@ static cl::opt<bool> UseHWPointOfView(
         "Print the layout in hardware point of view. This means the output is "
         "from the warp's perspective. Otherwise, the output is from the "
         "tensor's perspective (e.g., each element maps to xxx thread)."),
-    cl::init(false), cl::cat(PrinterCategory));
+    cl::init(false), cl::cat(getPrinterCategory()));
 
 static cl::opt<std::string> TensorStr(
     "t", cl::desc("Tensor shape and element type (e.g., tensor<2x2xf32>)"),
-    cl::init(""), cl::value_desc("tensor-type"), cl::cat(PrinterCategory));
+    cl::init(""), cl::value_desc("tensor-type"), cl::cat(getPrinterCategory()));
 
 //===--------------------------------------------------------------------===//
 // Helper functions
 //===--------------------------------------------------------------------===//
 
-LogicalResult layoutPrint(RankedTensorType tensorType, raw_ostream &os) {
-  // DistributedEncodingTrait and SharedEncodingAttr implements the
+static LogicalResult layoutPrint(RankedTensorType tensorType, raw_ostream &os) {
+  // DistributedEncodingTrait and SharedEncodingTrait implements the
   // toLinearLayout interface.
   mlir::Attribute layout = tensorType.getEncoding();
   if (isa<mlir::triton::gpu::DistributedEncodingTrait,
-          mlir::triton::gpu::SharedEncodingAttr>(layout)) {
+          mlir::triton::gpu::SharedEncodingTrait>(layout)) {
     os << triton::gpu::getLayoutStr(tensorType, UseHWPointOfView);
     return success();
   }
@@ -94,9 +97,11 @@ LogicalResult layoutPrint(RankedTensorType tensorType, raw_ostream &os) {
   return failure();
 }
 
-LogicalResult printLayoutFromFile(MLIRContext *context, StringRef filename,
-                                  ArrayRef<std::string> names,
-                                  TensorType tensorTy, raw_string_ostream &ss) {
+static LogicalResult printLayoutFromFile(MLIRContext *context,
+                                         StringRef filename,
+                                         ArrayRef<std::string> names,
+                                         TensorType tensorTy,
+                                         raw_string_ostream &ss) {
   if (filename.empty())
     return success();
 
@@ -152,10 +157,10 @@ LogicalResult printLayoutFromFile(MLIRContext *context, StringRef filename,
   return success();
 }
 
-LogicalResult printLayoutFromString(MLIRContext *context,
-                                    StringRef layoutAttrStr,
-                                    TensorType tensorTy,
-                                    raw_string_ostream &ss) {
+static LogicalResult printLayoutFromString(MLIRContext *context,
+                                           StringRef layoutAttrStr,
+                                           TensorType tensorTy,
+                                           raw_string_ostream &ss) {
   if (layoutAttrStr.empty())
     return success();
 
@@ -178,7 +183,7 @@ LogicalResult printLayoutFromString(MLIRContext *context,
 //===--------------------------------------------------------------------===//
 
 int main(int argc, char **argv) {
-  cl::HideUnrelatedOptions(PrinterCategory);
+  cl::HideUnrelatedOptions(getPrinterCategory());
   cl::ParseCommandLineOptions(argc, argv, "tensor layout printer\n");
 
   DialectRegistry registry;

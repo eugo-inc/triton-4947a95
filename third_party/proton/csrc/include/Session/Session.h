@@ -4,10 +4,12 @@
 #include "Context/Context.h"
 #include "Data/Metric.h"
 #include "Utility/Singleton.h"
+#include <algorithm>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <numeric>
 #include <set>
-#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -15,7 +17,6 @@ namespace proton {
 
 class Profiler;
 class Data;
-enum class OutputFormat;
 
 /// A session is a collection of profiler, context source, and data objects.
 /// There could be multiple sessions in the system, each can correspond to a
@@ -26,9 +27,13 @@ public:
 
   void activate();
 
-  void deactivate();
+  void deactivate(bool flushing);
 
-  void finalize(OutputFormat outputFormat);
+  void finalize(const std::string &outputFormat);
+
+  size_t getContextDepth();
+
+  Profiler *getProfiler() const { return profiler; }
 
 private:
   Session(size_t id, const std::string &path, Profiler *profiler,
@@ -39,13 +44,16 @@ private:
 
   template <typename T> std::vector<T *> getInterfaces() {
     std::vector<T *> interfaces;
+    // There's an implicit order between contextSource and profiler/data. The
+    // latter two rely on the contextSource to obtain the context, so we need to
+    // add the contextSource first.
+    if (auto interface = dynamic_cast<T *>(contextSource.get())) {
+      interfaces.push_back(interface);
+    }
     if (auto interface = dynamic_cast<T *>(profiler)) {
       interfaces.push_back(interface);
     }
     if (auto interface = dynamic_cast<T *>(data.get())) {
-      interfaces.push_back(interface);
-    }
-    if (auto interface = dynamic_cast<T *>(contextSource.get())) {
       interfaces.push_back(interface);
     }
     return interfaces;
@@ -69,19 +77,31 @@ public:
 
   size_t addSession(const std::string &path, const std::string &profilerName,
                     const std::string &contextSourceName,
-                    const std::string &dataName);
+                    const std::string &dataName, const std::string &mode);
 
-  void finalizeSession(size_t sessionId, OutputFormat outputFormat);
+  void finalizeSession(size_t sessionId, const std::string &outputFormat);
 
-  void finalizeAllSessions(OutputFormat outputFormat);
+  void finalizeAllSessions(const std::string &outputFormat);
 
   void activateSession(size_t sessionId);
 
   void activateAllSessions();
 
-  void deactivateSession(size_t sessionId);
+  void deactivateSession(size_t sessionId, bool flushing);
 
-  void deactivateAllSessions();
+  void deactivateAllSessions(bool flushing);
+
+  size_t getContextDepth(size_t sessionId);
+
+  std::vector<uint8_t> getDataMsgPack(size_t sessionId, size_t phase);
+
+  std::string getData(size_t sessionId, size_t phase);
+
+  void clearData(size_t sessionId, size_t phase, bool clearUpToPhase = false);
+
+  size_t advanceDataPhase(size_t sessionId);
+
+  bool isDataPhaseComplete(size_t sessionId, size_t phase);
 
   void enterScope(const Scope &scope);
 
@@ -91,21 +111,42 @@ public:
 
   void exitOp(const Scope &scope);
 
+  void initFunctionMetadata(
+      uint64_t functionId, const std::string &functionName,
+      const std::vector<std::pair<size_t, std::string>> &scopeIdNames,
+      const std::vector<std::pair<size_t, size_t>> &scopeIdParents,
+      const std::string &metadataPath);
+  void destroyFunctionMetadata(uint64_t functionId);
+
+  void enterInstrumentedOp(uint64_t streamId, uint64_t functionId,
+                           uint8_t *buffer, size_t size);
+
+  void exitInstrumentedOp(uint64_t streamId, uint64_t functionId,
+                          uint8_t *buffer, size_t size);
+
   void addMetrics(size_t scopeId,
-                  const std::map<std::string, MetricValueType> &metrics,
-                  bool aggregable);
+                  const std::map<std::string, MetricValueType> &scalarMetrics,
+                  const std::map<std::string, TensorMetric> &tensorMetrics);
+
+  void setMetricKernels(const MetricKernelLaunchState &metricKernelLaunchState);
 
   void setState(std::optional<Context> context);
 
 private:
+  Profiler *validateAndSetProfilerMode(Profiler *profiler,
+                                       const std::string &mode);
+
   std::unique_ptr<Session> makeSession(size_t id, const std::string &path,
                                        const std::string &profilerName,
                                        const std::string &contextSourceName,
-                                       const std::string &dataName);
+                                       const std::string &dataName,
+                                       const std::string &mode);
+
+  Session *getSessionOrThrow(size_t sessionId);
 
   void activateSessionImpl(size_t sessionId);
 
-  void deActivateSessionImpl(size_t sessionId);
+  void deactivateSessionImpl(size_t sessionId, bool flushing);
 
   size_t getSessionId(const std::string &path) { return sessionPaths[path]; }
 
@@ -119,23 +160,61 @@ private:
 
   void removeSession(size_t sessionId);
 
-  template <typename Interface, typename Counter>
-  void registerInterface(size_t sessionId, Counter &interfaceCounts) {
+  template <typename Interface, typename Counter, bool isRegistering>
+  void updateInterfaceCount(size_t sessionId, Counter &interfaceCounts) {
     auto interfaces = sessions[sessionId]->getInterfaces<Interface>();
     for (auto *interface : interfaces) {
-      interfaceCounts[interface] += 1;
+      auto it = std::find_if(
+          interfaceCounts.begin(), interfaceCounts.end(),
+          [interface](const auto &pair) { return pair.first == interface; });
+
+      if (it != interfaceCounts.end()) {
+        if constexpr (isRegistering) {
+          ++it->second;
+        } else {
+          --it->second;
+          if (it->second == 0) {
+            interfaceCounts.erase(it);
+          }
+        }
+      } else if constexpr (isRegistering) {
+        interfaceCounts.emplace_back(interface, 1);
+      }
     }
+  }
+
+  template <typename Interface, typename Counter>
+  void registerInterface(size_t sessionId, Counter &interfaceCounts) {
+    updateInterfaceCount<Interface, Counter, true>(sessionId, interfaceCounts);
   }
 
   template <typename Interface, typename Counter>
   void unregisterInterface(size_t sessionId, Counter &interfaceCounts) {
-    auto interfaces = sessions[sessionId]->getInterfaces<Interface>();
-    for (auto *interface : interfaces) {
-      interfaceCounts[interface] -= 1;
+    updateInterfaceCount<Interface, Counter, false>(sessionId, interfaceCounts);
+  }
+
+  template <typename Counter, typename FnT>
+  void executeInterface(Counter &interfaceCounts, FnT &&fn,
+                        bool isReversed = false) {
+    auto process = [&](auto &entry) {
+      if (entry.second > 0) {
+        fn(entry.first);
+      }
+    };
+
+    if (isReversed) {
+      for (auto it = interfaceCounts.rbegin(); it != interfaceCounts.rend();
+           ++it) {
+        process(*it);
+      }
+    } else {
+      for (auto &entry : interfaceCounts) {
+        process(entry);
+      }
     }
   }
 
-  mutable std::shared_mutex mutex;
+  mutable std::mutex mutex;
 
   size_t nextSessionId{};
   // path -> session id
@@ -144,12 +223,17 @@ private:
   std::map<size_t, bool> sessionActive;
   // session id -> session
   std::map<size_t, std::unique_ptr<Session>> sessions;
-  // scope -> active count
-  std::map<ScopeInterface *, size_t> scopeInterfaceCounts;
-  // op -> active count
-  std::map<OpInterface *, size_t> opInterfaceCounts;
-  // context source -> active count
-  std::map<ContextSource *, size_t> contextSourceCounts;
+  // {scope, active count}
+  std::vector<std::pair<ScopeInterface *, size_t>> scopeInterfaceCounts;
+  // {op, active count}
+  std::vector<std::pair<OpInterface *, size_t>> opInterfaceCounts;
+  // {instrumentation, active count}
+  std::vector<std::pair<InstrumentationInterface *, size_t>>
+      instrumentationInterfaceCounts;
+  // {metric, active count}
+  std::vector<std::pair<MetricInterface *, size_t>> metricInterfaceCounts;
+  // {context source, active count}
+  std::vector<std::pair<ContextSource *, size_t>> contextSourceCounts;
 };
 
 } // namespace proton

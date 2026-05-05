@@ -3,11 +3,14 @@ add_triton_library(TritonGPUIR
   LinearLayoutConversions.cpp
   Ops.cpp
   Types.cpp
+  Traits.cpp
 
   DEPENDS
+  TritonGPUCGAAttrIncGen
   TritonGPUTableGen
   TritonGPUAttrDefsIncGen
   TritonGPUTypeInterfacesIncGen
+  TritonGPUOpInterfacesIncGen
 
   LINK_LIBS PUBLIC
   MLIRGPUDialect

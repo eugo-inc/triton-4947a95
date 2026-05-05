@@ -6,10 +6,9 @@ if(POLICY CMP0116)
   cmake_policy(SET CMP0116 OLD)
 endif()
 
-include(ExternalProject)
+# include(ExternalProject) # @EUGO_CHANGE - we don't use ExternalProject
 
-# @EUGO_CHANGE: # See bullet (5) in `info.md` in `protomolecule/dependencies/native/triton/info.md`
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17) # @EUGO_CHANGE: # See bullet (5) in `info.md` in `protomolecule/dependencies/native/triton/info.md`
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -17,6 +16,7 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 project(triton CXX C)
 include(CTest)
+include(GNUInstallDirs)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -25,8 +25,142 @@ option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
 option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
-set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
+option(TRITON_OFFLINE_BUILD "Build without downloading dependencies" OFF)
+# @EUGO_CHANGE: @begin Leave TRITON_EXT_ENABLED=OFF (default).
+# Setting it ON would do two things upstream: (1) skip `-fvisibility=hidden` (we already achieve default
+# visibility by directly removing that flag below), and (2) define the preprocessor macro `TRITON_EXT_ENABLED=1`
+# which gates plugin-loader compatibility checks in upstream code (commits 8497c845af, 6cb844590c). We don't
+# load Triton plugins, so flipping this would only opt us into a side-effecting code path with no upside.
+option(TRITON_EXT_ENABLED "Build with default visibility for Triton+LLVM symbol exposure to plugin extensions" OFF)
+# @EUGO_CHANGE: @end
 option(EUGO_TRITON_BUILD_APPS "Build CLI apps from ./bin" OFF) # @EUGO_CHANGE: added this CMake option to control whether to build CLI apps or not
+set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
+set(TRITON_VERSION "" CACHE STRING "Triton version string (passed from setup.py)")
+set(TRITON_CACHE_PATH "" CACHE PATH "Path to triton cache")
+set(TRITON_LLVM_SYSTEM_SUFFIX "" CACHE STRING "Path to LLVM system suffix")
+set(LLVM_SYSPATH "" CACHE PATH "Path to system LLVM installation")
+set(JSON_SYSPATH "" CACHE PATH "Path to system nlohmann/json headers")
+set(TRITON_PTXAS_PATH "" CACHE FILEPATH "Path override for ptxas")
+set(TRITON_PTXAS_BLACKWELL_PATH "" CACHE FILEPATH "Path override for ptxas-blackwell")
+set(TRITON_CUOBJDUMP_PATH "" CACHE FILEPATH "Path override for cuobjdump")
+set(TRITON_NVDISASM_PATH "" CACHE FILEPATH "Path override for nvdisasm")
+set(TRITON_CUDACRT_PATH "" CACHE PATH "Path to CUDA CRT headers.")
+set(TRITON_CUDART_PATH "" CACHE PATH "Path to CUDA Runtime headers")
+set(TRITON_CUPTI_INCLUDE_PATH "" CACHE PATH "Path to CUPTI headers")
+set(TRITON_CUPTI_LIB_PATH "" CACHE PATH "Path to CUPTI libraries")
+set(TRITON_CUPTI_LIB_BLACKWELL_PATH "" CACHE PATH "Path to Blackwell CUPTI libraries")
+
+if(NOT TRITON_CACHE_PATH)
+  message(FATAL_ERROR "TRITON_CACHE_PATH must be set or derivable from TRITON_HOME/HOME/USERPROFILE/HOMEPATH.")
+endif()
+
+set(TRITON_BUILD_HELPER_COMMON_ARGS --triton-cache-path "${TRITON_CACHE_PATH}")
+if("${TRITON_OFFLINE_BUILD}")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-offline-build)
+endif()
+if(NOT "${TRITON_LLVM_SYSTEM_SUFFIX}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-llvm-system-suffix "${TRITON_LLVM_SYSTEM_SUFFIX}")
+endif()
+if(NOT "${LLVM_SYSPATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --llvm-syspath "${LLVM_SYSPATH}")
+endif()
+if(NOT "${JSON_SYSPATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --json-syspath "${JSON_SYSPATH}")
+endif()
+if(NOT "${TRITON_PTXAS_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-ptxas-path "${TRITON_PTXAS_PATH}")
+endif()
+if(NOT "${TRITON_PTXAS_BLACKWELL_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-ptxas-blackwell-path "${TRITON_PTXAS_BLACKWELL_PATH}")
+endif()
+if(NOT "${TRITON_CUOBJDUMP_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-cuobjdump-path "${TRITON_CUOBJDUMP_PATH}")
+endif()
+if(NOT "${TRITON_NVDISASM_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-nvdisasm-path "${TRITON_NVDISASM_PATH}")
+endif()
+if(NOT "${TRITON_CUDACRT_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-cudacrt-path "${TRITON_CUDACRT_PATH}")
+endif()
+if(NOT "${TRITON_CUDART_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-cudart-path "${TRITON_CUDART_PATH}")
+endif()
+if(NOT "${TRITON_CUPTI_INCLUDE_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-cupti-include-path "${TRITON_CUPTI_INCLUDE_PATH}")
+endif()
+if(NOT "${TRITON_CUPTI_LIB_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-cupti-lib-path "${TRITON_CUPTI_LIB_PATH}")
+endif()
+if(NOT "${TRITON_CUPTI_LIB_BLACKWELL_PATH}" STREQUAL "")
+  list(APPEND TRITON_BUILD_HELPER_COMMON_ARGS --triton-cupti-lib-blackwell-path "${TRITON_CUPTI_LIB_BLACKWELL_PATH}")
+endif()
+
+# Resolve third-party package paths in CMake so direct CMake builds don't rely on setup.py.
+set(TRITON_HAS_LLVM_SYSPATH OFF)
+if(NOT "${LLVM_SYSPATH}" STREQUAL "")
+  set(TRITON_HAS_LLVM_SYSPATH ON)
+  if(NOT DEFINED LLVM_INCLUDE_DIRS)
+    set(LLVM_INCLUDE_DIRS "${LLVM_SYSPATH}/include")
+  endif()
+  if(NOT DEFINED LLVM_LIBRARY_DIR)
+    set(LLVM_LIBRARY_DIR "${LLVM_SYSPATH}/lib")
+  endif()
+endif()
+
+if(NOT "${JSON_SYSPATH}" STREQUAL "" AND NOT DEFINED JSON_INCLUDE_DIR)
+  set(JSON_INCLUDE_DIR "${JSON_SYSPATH}/include")
+endif()
+
+# Regenerate Triton Version Header
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/triton/Version.h.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/include/triton/Version.h"
+  @ONLY
+)
+
+# Regenerate configure outputs during `cmake --build` when helper inputs change.
+set_property(
+  DIRECTORY
+  APPEND
+  PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/python/build_helpers.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/llvm-hash.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/json-version.txt"
+)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(TRITON_THIRD_PARTY_CMAKE_VARS_FILE "${CMAKE_CURRENT_BINARY_DIR}/triton-third-party-vars.cmake")
+execute_process(
+  COMMAND
+    ${Python3_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/python/build_helpers.py"
+    write_thirdparty_cmake_vars
+    ${TRITON_BUILD_HELPER_COMMON_ARGS}
+    --output
+    "${TRITON_THIRD_PARTY_CMAKE_VARS_FILE}"
+    --packages llvm json
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMAND_ERROR_IS_FATAL ANY
+)
+include("${TRITON_THIRD_PARTY_CMAKE_VARS_FILE}")
+
+if(TRITON_BUILD_PYTHON_MODULE)
+  set_property(
+    DIRECTORY
+    APPEND
+    PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/python/build_helpers.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/nvidia-toolchain-version.json"
+  )
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/python/build_helpers.py
+            download_and_copy_dependencies
+            ${TRITON_BUILD_HELPER_COMMON_ARGS}
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+endif()
 
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
@@ -97,6 +231,10 @@ if(NOT MLIR_DIR)
   set(MLIR_DIR ${LLVM_LIBRARY_DIR}/cmake/mlir)
 endif()
 
+if(NOT LLD_DIR)
+  set(LLD_DIR ${LLVM_LIBRARY_DIR}/cmake/lld)
+endif()
+
 # MLIR
 find_package(MLIR REQUIRED CONFIG PATHS ${MLIR_DIR})
 
@@ -130,7 +268,7 @@ set_property(GLOBAL PROPERTY TRITON_LIBS "")
 function(add_triton_library name)
   set_property(GLOBAL APPEND PROPERTY TRITON_LIBS ${name})
   add_triton_object(${name} ${ARGN})
-  llvm_update_compile_flags(${name})
+  target_compile_options(${name} PRIVATE ${TRITON_DISABLE_EH_RTTI_FLAGS})
 endfunction()
 
 set_property(GLOBAL PROPERTY TRITON_PLUGINS "")
@@ -139,10 +277,32 @@ function(add_triton_plugin name)
   add_triton_object(${name} ${ARGN})
 endfunction()
 
-
 # Disable warnings that show up in external code (gtest;pybind11)
 if(NOT MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-covered-switch-default -fvisibility=hidden")
+  # @EUGO_CHANGE: @begin keep exceptions + RTTI propagated.
+  # Upstream applies `set($<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti per-target>)` via
+  # `target_compile_options(${name} PRIVATE ${TRITON_DISABLE_EH_RTTI_FLAGS})` inside
+  # add_triton_library(). We force this empty so exceptions and RTTI propagate.
+  set(TRITON_DISABLE_EH_RTTI_FLAGS "")
+  # @EUGO_CHANGE: @end
+
+  if(NOT TRITON_EXT_ENABLED)
+    # @EUGO_CHANGE: removed `-fvisibility=hidden` here. We want default visibility for libtriton.so
+    # symbols. (See note next to the TRITON_EXT_ENABLED option declaration above for why we don't
+    # just set TRITON_EXT_ENABLED=ON instead.)
+    # `set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility=hidden")`
+  else()
+    # Inform plugin loader if that libtriton is compiled with visibility
+    # so that they will not proceed with loading plugins if that will
+    # crash a Triton not compiled with visibility due to missing symbols.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTRITON_EXT_ENABLED=1")
+  endif()
+  # @EUGO_CHANGE: @begin: dropped `-Werror` (warnings should stay warnings, not become hard build failures);
+  # added `-Wno-error` defensively in case `-Werror` slips in via another path. `-Wno-covered-switch-default`
+  # silences a noisy clang warning about `default:` cases in fully-covered enum switches — harmless.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -Wno-covered-switch-default ")
+  # @EUGO_CHANGE: @end
+
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4244 /wd4624 /wd4715 /wd4530")
 endif()
@@ -162,10 +322,9 @@ add_subdirectory(lib)
 # TODO: Figure out which target is sufficient to fix errors; triton is
 # apparently not enough. Currently set linking libstdc++fs for all targets
 # to support some old version GCC compilers like 8.3.0.
-if (NOT WIN32 AND NOT APPLE)
+if (NOT WIN32 AND NOT APPLE AND NOT BSD)
   # link_libraries(stdc++fs) # @EUGO_CHANGE - this library is libstc++ specific. And it only applies to really old (10+ years) GCC compilers because in modern versions it doesn't exist as standalone library (just part of stdc++)
 endif()
-
 
 # -----
 
@@ -178,6 +337,17 @@ if(TRITON_BUILD_PYTHON_MODULE)
   # Python Interpreter is used to run lit tests
   find_package(Python3 REQUIRED COMPONENTS Development.Module Interpreter)
   find_package(pybind11 CONFIG REQUIRED HINTS "${Python3_SITELIB}")
+
+  foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
+    add_subdirectory(third_party/${CODEGEN_BACKEND})
+  endforeach()
+
+  if (TRITON_BUILD_PROTON)
+    add_subdirectory(third_party/proton)
+  endif()
+  # We always build proton dialect
+  list(APPEND TRITON_PLUGIN_NAMES "proton")
+  add_subdirectory(third_party/proton/Dialect)
 
   if (DEFINED TRITON_PLUGIN_DIRS)
     foreach(PLUGIN_DIR ${TRITON_PLUGIN_DIRS})
@@ -196,18 +366,6 @@ if(TRITON_BUILD_PYTHON_MODULE)
     endforeach()
   endif()
 
-  foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
-    message(STATUS "Building CODEGEN_BACKEND '${CODEGEN_BACKEND}'")
-    add_subdirectory(third_party/${CODEGEN_BACKEND})
-  endforeach()
-
-  if (TRITON_BUILD_PROTON)
-    add_subdirectory(third_party/proton)
-  endif()
-  # We always build proton dialect
-  list(APPEND TRITON_PLUGIN_NAMES "proton")
-  add_subdirectory(third_party/proton/dialect)
-
   get_property(triton_libs GLOBAL PROPERTY TRITON_LIBS)
   get_property(triton_plugins GLOBAL PROPERTY TRITON_PLUGINS)
   set(TRITON_LIBRARIES
@@ -219,11 +377,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRNVVMDialect
     MLIRNVVMToLLVMIRTranslation
     MLIRGPUToNVVMTransforms
-    MLIRGPUToGPURuntimeTransforms
-    MLIRGPUTransforms
     MLIRIR
     MLIRControlFlowToLLVM
-    MLIRBytecodeWriter
     MLIRPass
     MLIRTransforms
     MLIRLLVMDialect
@@ -282,23 +437,58 @@ if(TRITON_BUILD_PYTHON_MODULE)
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
   add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
                   ${PYTHON_SRC_PATH}/ir.cc
+                  ${PYTHON_SRC_PATH}/gluon_ir.cc
+                  ${CMAKE_CURRENT_SOURCE_DIR}/python/triton/experimental/gsan/src/gsan_testing.cc
+                  ${PYTHON_SRC_PATH}/linear_layout.cc
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
-                  ${PYTHON_SRC_PATH}/llvm.cc)
+                  ${PYTHON_SRC_PATH}/llvm.cc
+                  ${PYTHON_SRC_PATH}/specialize.cc)
 
   # Link triton with its dependencies
   target_link_libraries(triton PRIVATE ${TRITON_LIBRARIES})
+
+
+  # Do not propagate libraries that libtriton depends on. This ensures that
+  # targets that link against libtriton do not accidentally link in their own
+  # copies of core Triton code and LLVM.
+  set_target_properties(triton PROPERTIES INTERFACE_LINK_LIBRARIES "")
+
   if(WIN32)
     target_link_libraries(triton PRIVATE ${CMAKE_DL_LIBS})
     set_target_properties(triton PROPERTIES SUFFIX ".pyd")
     set_target_properties(triton PROPERTIES PREFIX "lib")
   else()
-    # @EUGO_CHANGE - dont link with zlib, we don't need it
-    # target_link_libraries(triton PRIVATE z)
+    # target_link_libraries(triton PRIVATE z) # @EUGO_CHANGE - dont link with zlib, we don't need it
   endif()
   target_link_options(triton PRIVATE ${LLVM_LDFLAGS})
 
-  # @EUGO_CHANGE - conditionally enable FileCheck for LLVM_SYSPATH (as it's just for testing) and TRITON_WHEEL_DIR
+  if(NOT TRITON_EXT_ENABLED)
+    # When extensions are disabled, only export the Python entrypoint.
+    set(TRITON_EXPORT_SYMBOLS_FILE "${CMAKE_CURRENT_BINARY_DIR}/triton.exports")
+    if(APPLE)
+      set(TRITON_EXPORT_SYMBOLS_FILE_CONTENT "_PyInit_libtriton\n")
+      target_link_options(triton PRIVATE
+        "LINKER:-exported_symbols_list,${TRITON_EXPORT_SYMBOLS_FILE}")
+    elseif(UNIX)
+      set(TRITON_EXPORT_SYMBOLS_FILE_CONTENT
+        "{\n  global:\n    PyInit_libtriton;\n  local:\n    *;\n};\n")
+      target_link_options(triton PRIVATE
+        "LINKER:--version-script,${TRITON_EXPORT_SYMBOLS_FILE}")
+    endif()
+    file(GENERATE OUTPUT "${TRITON_EXPORT_SYMBOLS_FILE}"
+      CONTENT "${TRITON_EXPORT_SYMBOLS_FILE_CONTENT}")
+  endif()
+
+  install(TARGETS triton
+    COMPONENT libraries
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+
+  # @EUGO_CHANGE: @begin gate FileCheck setup behind EUGO_TRITON_BUILD_APPS.
+  # FileCheck is only needed by lit tests under bin/, which we don't build by default. Wrapping this
+  # block lets the wheel build succeed without requiring LLVM_SYSPATH/TRITON_WHEEL_DIR to be set.
   if (EUGO_TRITON_BUILD_APPS)
     if (NOT DEFINED LLVM_SYSPATH)
         message(FATAL_ERROR "LLVM_SYSPATH must be set.")
@@ -309,14 +499,16 @@ if(TRITON_BUILD_PYTHON_MODULE)
     endif()
 
     configure_file(
-        "${LLVM_SYSPATH}/bin/FileCheck"
-        "${TRITON_WHEEL_DIR}/FileCheck"
-        COPYONLY)
+      "${LLVM_SYSPATH}/bin/FileCheck"
+      "${TRITON_WHEEL_DIR}/FileCheck"
+      COPYONLY)
   endif()
-endif()
+  # @EUGO_CHANGE: @end
 
-if (UNIX AND NOT APPLE)
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--exclude-libs,ALL")
+  # Build plugins when building libtriton since they depend on libtriton.
+  if(TRITON_EXT_ENABLED)
+    add_subdirectory(examples/plugins)
+  endif()
 endif()
 
 if(TRITON_BUILD_PYTHON_MODULE AND NOT WIN32)
@@ -334,7 +526,7 @@ if(NOT TRITON_BUILD_PYTHON_MODULE)
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
-  add_subdirectory(third_party/proton/dialect)
+  add_subdirectory(third_party/proton/Dialect)
 endif()
 
 find_package(Threads REQUIRED)
@@ -349,7 +541,7 @@ else()
   message(STATUS "[EUGO] Skipping Triton CLI applications build")
 endif()
 
-# @EUGO_NOTE - we can't exclude the entire test directory because it builds libGPUInstrumentationTestLib and it's shipped in the Python wheel so we preserve it
+# @EUGO_CHANGE: @NOTE - we can't exclude the entire test directory because it builds libGPUInstrumentationTestLib and it's shipped in the Python wheel so we preserve it
 # we DK if it's actually needed at runtime but :shrug:
 add_subdirectory(test)
 
@@ -363,8 +555,30 @@ if(TRITON_BUILD_UT)
   )
 endif()
 
+# @EUGO_CHANGE: @begin Skip upstream's C++ developer-SDK header installs.
+# These install *.h / *.h.inc / *.td to ${CMAKE_INSTALL_INCLUDEDIR} (i.e. system include paths) for
+# someone linking against libtriton.so as a C++ library. We ship a Python-only wheel (consumed via
+# `import triton`); the upstream PyPI wheel doesn't include these either. If a downstream ever needs
+# the C++ SDK, expose it behind a new EUGO_* CMake option rather than enabling this unconditionally.
+# install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+#   COMPONENT headers
+#   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+#   FILES_MATCHING PATTERN "*.h")
+# install(DIRECTORY ${PROJECT_BINARY_DIR}/include/
+#   COMPONENT headers
+#   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+#   FILES_MATCHING PATTERN "*.h" PATTERN "*.h.inc")
+# install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+#   COMPONENT headers
+#   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+#   FILES_MATCHING PATTERN "*.td")
+# install(DIRECTORY ${PROJECT_SOURCE_DIR}/python/
+#   COMPONENT headers
+#   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/python
+#   FILES_MATCHING PATTERN "*.h")
+# @EUGO_CHANGE: @end
 
-# === @begin: Eugo wrapper @EUGO_CHANGE ===
-# `SKBUILD_PLATLIB_DIR` resolves to `site-packages`
+# @EUGO_CHANGE: @begin Eugo wheel-shaping wrapper. Must come after all original code.
+# `SKBUILD_PLATLIB_DIR` resolves to `site-packages`.
 include(eugo_wrapper.cmake)
-# === @end: Eugo wrapper ===
+# @EUGO_CHANGE: @end

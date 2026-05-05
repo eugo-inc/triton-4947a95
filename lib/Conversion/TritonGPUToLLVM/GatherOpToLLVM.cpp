@@ -50,14 +50,15 @@ GatherOpConversion::matchAndRewrite(GatherOp op, OpAdaptor adaptor,
 
 static Value convertIndexToI32(Location loc, Value index,
                                ConversionPatternRewriter &rewriter) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   unsigned idxWidth = index.getType().getIntOrFloatBitWidth();
   // The LL index computations are performed with 32 bit integers. If the
   // indices are something else, cast them to i32.
   if (idxWidth > 32) {
-    index = trunc(i32_ty, index);
+    index = b.trunc(i32_ty, index);
   } else if (idxWidth < 32) {
     // Negative indices don't make sense, so zero-extend.
-    index = zext(i32_ty, index);
+    index = b.zext(i32_ty, index);
   }
   return index;
 }
@@ -65,6 +66,7 @@ static Value convertIndexToI32(Location loc, Value index,
 void GatherOpConversion::emitGatherInShared(
     GatherOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const {
   Location loc = op.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   RankedTensorType srcType = op.getSrc().getType();
 
   // Compute the src subtensor shape owned by this CTA.
@@ -95,12 +97,12 @@ void GatherOpConversion::emitGatherInShared(
     // tensor.
     Value offset = LLVM::linearize(rewriter, loc, indices, srcShapePerCTA);
     // Emit the offset into the shared memory and then store the value.
-    Value ptr = gep(smemBase.getType(), elemType, smemBase, offset);
-    store(value, ptr);
+    Value ptr = b.gep(smemBase.getType(), elemType, smemBase, offset);
+    targetInfo.storeShared(rewriter, loc, ptr, value, b.true_val());
   }
 
   // Synchronize the whole CTA.
-  barrier();
+  b.barrier(triton::gpu::AddrSpace::Local);
 
   // Grab the index values owned by this thread.
   SmallVector<Value> idxValues =
@@ -124,8 +126,9 @@ void GatherOpConversion::emitGatherInShared(
   for (auto [i, idx, indices] : llvm::enumerate(idxValues, dstIndices)) {
     indices[axis] = convertIndexToI32(loc, idx, rewriter);
     Value offset = LLVM::linearize(rewriter, loc, indices, srcShapePerCTA);
-    Value ptr = gep(smemBase.getType(), elemType, smemBase, offset);
-    results[i] = load(elemType, ptr);
+    Value ptr = b.gep(smemBase.getType(), elemType, smemBase, offset);
+    results[i] =
+        targetInfo.loadShared(rewriter, loc, ptr, elemType, b.true_val());
   }
 
   Value packed =
@@ -188,6 +191,7 @@ void GatherOpConversion::emitWarpLocalGather(
     GatherOp op, OpAdaptor adaptor, ConversionPatternRewriter &rewriter) const {
   MLIRContext *ctx = op.getContext();
   Location loc = op.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
   RankedTensorType srcType = op.getSrc().getType();
   RankedTensorType idxType = op.getIndices().getType();
 
@@ -206,10 +210,8 @@ void GatherOpConversion::emitWarpLocalGather(
   }
 
   // Compute the src and idx layouts.
-  LinearLayout srcLayout =
-      *toLinearLayout(srcType.getShape(), srcType.getEncoding());
-  LinearLayout idxLayout =
-      *toLinearLayout(idxType.getShape(), idxType.getEncoding());
+  LinearLayout srcLayout = toLinearLayout(srcType);
+  LinearLayout idxLayout = toLinearLayout(idxType);
 
   // Let `ll_src` be the source layout and `ll_idx` be the index layout.
   // Let `src_col` be a tuple of dimensions except the gather dimension,
@@ -247,9 +249,9 @@ void GatherOpConversion::emitWarpLocalGather(
 
   // Sanity check: the warp must be invariant to the index because otherwise the
   // gather would need to read across warps!
-  assert(invSrcLayout.sublayoutIsZero(kGatherDim, {kBlock, kWarp}) &&
+  assert(invSrcLayout.sublayoutIsZero(kGatherDim, {kWarp, kBlock}) &&
          "expected a warp-local gather");
-  invSrcLayout = invSrcLayout.sublayout(allDims, {kLane, kRegister});
+  invSrcLayout = invSrcLayout.sublayout(allDims, {kRegister, kLane});
 
   LinearLayout idxColLayout =
       idxLayout.sublayout({kBlock, kWarp, kLane, kRegister}, otherDims);
@@ -259,9 +261,8 @@ void GatherOpConversion::emitWarpLocalGather(
   SmallVector<Value> idxValues =
       unpackLLElements(loc, adaptor.getIndices(), rewriter);
 
-  auto [laneId, warpId, blockId] =
-      emitHardwareTuple(loc, rewriter, targetInfo, /*withCTAOffset=*/true,
-                        srcLayout.getInDimSize(kLane));
+  auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+  Value blockId = targetInfo.getClusterCTAId(rewriter, loc);
 
   unsigned /*N=*/srcRegsPerThread = srcLayout.getInDimSize(kRegister);
   assert(srcRegsPerThread == srcValues.size());
@@ -275,21 +276,7 @@ void GatherOpConversion::emitWarpLocalGather(
   LinearLayout invertSrcRegMap = invSrcLayout.sublayout(allDims, {kRegister});
   // Remove zero bases in the gather dimension to make the function injective
   // (for a given column) over the same codomain.
-  LinearLayout::BasesT newInvertRegMapBases;
-  for (auto &[inDim, inDimBases] : invertSrcRegMap.getBases()) {
-    auto &newInDimBases = newInvertRegMapBases[inDim];
-    if (inDim != kGatherDim) {
-      newInDimBases = inDimBases;
-      continue;
-    }
-    for (auto &basis : inDimBases) {
-      if (llvm::any_of(basis, [](int32_t val) { return val != 0; })) {
-        newInDimBases.push_back(basis);
-      }
-    }
-  }
-  invertSrcRegMap = LinearLayout(
-      newInvertRegMapBases, llvm::to_vector(invertSrcRegMap.getOutDimNames()));
+  invertSrcRegMap = invertSrcRegMap.removeZeroBasesAlongDim(kGatherDim);
   // We are left with only non-zero bases in the gather dimension, which means
   // the number of registers per column is the size of the "gather dimension".
   unsigned numRegsPerColumn = invertSrcRegMap.getInDimSize(kGatherDim);
@@ -310,19 +297,20 @@ void GatherOpConversion::emitWarpLocalGather(
   for (auto [idxReg, idxVal] : llvm::enumerate(idxValues)) {
     SmallVector<std::pair<StringAttr, Value>> column =
         applyLinearLayout(loc, rewriter, idxColLayout,
-                          {{kBlock, blockId},
-                           {kWarp, warpId},
+                          {{kRegister, b.i32_val(idxReg)},
                            {kLane, laneId},
-                           {kRegister, i32_val(idxReg)}});
+                           {kWarp, warpId},
+                           {kBlock, blockId}});
     assert(column.size() == otherDims.size());
 
     // Combine the computed column with the data-dependent gather index.
-    column.emplace_back(kGatherDim, convertIndexToI32(loc, idxVal, rewriter));
+    column.insert(column.begin() + op.getAxis(),
+                  {kGatherDim, convertIndexToI32(loc, idxVal, rewriter)});
     SmallVector<std::pair<StringAttr, Value>> srcLaneAndReg =
         applyLinearLayout(loc, rewriter, invSrcLayout, column);
 
-    auto [srcLaneName, srcLane] = srcLaneAndReg.back();
     auto [srcRegName, srcReg] = srcLaneAndReg.front();
+    auto [srcLaneName, srcLane] = srcLaneAndReg.back();
     assert(srcLaneName == kLane && srcRegName == kRegister);
 
     assert(!srcValues.empty() && "can't gather from an empty tensor");
@@ -334,7 +322,7 @@ void GatherOpConversion::emitWarpLocalGather(
     int32_t srcBase =
         invertSrcRegMapColPart.apply(normalizedColumn).front().second;
 
-    Value result = undef(srcValues.front().getType());
+    Value result = b.undef(srcValues.front().getType());
     for (unsigned i = 0; i != numRegsPerColumn; ++i) {
       int32_t rest =
           invertSrcRegMapRest.apply({{kGatherDim, i}}).front().second;
@@ -342,7 +330,7 @@ void GatherOpConversion::emitWarpLocalGather(
 
       Value value =
           targetInfo.shuffleIdx(rewriter, loc, srcValues[srcRegIdx], srcLane);
-      result = select(icmp_eq(i32_val(srcRegIdx), srcReg), value, result);
+      result = b.select(b.icmp_eq(b.i32_val(srcRegIdx), srcReg), value, result);
     }
 
     results.push_back(result);

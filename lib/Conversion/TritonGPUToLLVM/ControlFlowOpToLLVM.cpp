@@ -13,6 +13,8 @@ struct ReturnOpConversion : public ConvertOpToLLVMPattern<triton::ReturnOp> {
   matchAndRewrite(triton::ReturnOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto funcOp = op->getParentOfType<LLVM::LLVMFuncOp>();
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     if (funcOp->hasAttr("nvvm.kernel")) {
       // A GPU kernel
       if (op.getNumOperands() > 0) {
@@ -26,20 +28,19 @@ struct ReturnOpConversion : public ConvertOpToLLVMPattern<triton::ReturnOp> {
       LLVM::ReturnOp newOp;
       if (adaptor.getOperands().size() < 2) {
         // Single or no return value.
-        newOp =
-            rewriter.create<LLVM::ReturnOp>(op.getLoc(), adaptor.getOperands());
+        newOp = LLVM::ReturnOp::create(rewriter, op.getLoc(),
+                                       adaptor.getOperands());
       } else {
         // Pack the results into a struct.
         auto packedResultsTy = this->getTypeConverter()->packFunctionResults(
             funcOp.getResultTypes());
         Value packedResults =
-            rewriter.create<LLVM::UndefOp>(op.getLoc(), packedResultsTy);
-        auto loc = op.getLoc();
+            LLVM::UndefOp::create(rewriter, op.getLoc(), packedResultsTy);
         for (auto it : llvm::enumerate(adaptor.getOperands())) {
-          packedResults = insert_val(packedResultsTy, packedResults, it.value(),
-                                     it.index());
+          packedResults = b.insert_val(packedResultsTy, packedResults,
+                                       it.value(), it.index());
         }
-        newOp = rewriter.create<LLVM::ReturnOp>(op.getLoc(), packedResults);
+        newOp = LLVM::ReturnOp::create(rewriter, op.getLoc(), packedResults);
       }
       newOp->setAttrs(op->getAttrs());
       rewriter.replaceOp(op, newOp->getResults());
@@ -78,11 +79,13 @@ private:
     // Get the last argument of the caller, which is the current stack pointer
     // of shared memory and append it to the operands of the callOp.
     auto loc = callOp.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto caller = callOp->getParentOfType<FunctionOpInterface>();
     auto promotedOperands = this->getTypeConverter()->promoteOperands(
         callOp.getLoc(), /*opOperands=*/callOp->getOperands(),
         adaptor.getOperands(), rewriter);
-    if (!caller->hasAttr("allocation.offset")) {
+    if (!caller->hasAttr("allocation.offset") ||
+        !callOp->hasAttr("allocation.offset")) {
       auto base = LLVM::getStackPointer(rewriter, caller);
       promotedOperands.push_back(base);
     } else {
@@ -90,16 +93,21 @@ private:
       promotedOperands.push_back(base);
     }
 
-    auto opOffsetAttr = caller->getAttrOfType<mlir::IntegerAttr>(
+    auto opOffsetAttr = callOp->getAttrOfType<mlir::IntegerAttr>(
         "ttg.global_scratch_memory_offset");
-    Value opOffsetVal;
-    if (opOffsetAttr) {
-      auto opOffset = opOffsetAttr.getValue().getZExtValue();
-      opOffsetVal = i32_val(opOffset);
-    }
+    Value globalOffsetVal;
+    if (opOffsetAttr)
+      globalOffsetVal = b.i32_val(opOffsetAttr.getValue().getZExtValue());
+    auto profileOffsetAttr = callOp->getAttrOfType<mlir::IntegerAttr>(
+        "ttg.profile_scratch_memory_offset");
+    Value profileOffsetVal;
+    if (profileOffsetAttr)
+      profileOffsetVal = b.i32_val(profileOffsetAttr.getValue().getZExtValue());
 
-    promotedOperands.push_back(
-        LLVM::getGlobalScratchPtr(loc, rewriter, caller, opOffsetVal));
+    promotedOperands.push_back(LLVM::getGlobalScratchPtr(
+        loc, rewriter, targetInfo, caller, globalOffsetVal));
+    promotedOperands.push_back(LLVM::getProfileScratchPtr(
+        loc, rewriter, targetInfo, caller, profileOffsetVal));
     return promotedOperands;
   }
 
@@ -117,9 +125,10 @@ private:
                 this->getTypeConverter()->packFunctionResults(resultTypes)))
         return nullptr;
     }
-    auto newCallOp = rewriter.create<LLVM::CallOp>(
-        callOp.getLoc(), packedResult ? TypeRange(packedResult) : TypeRange(),
-        promotedOperands, callOp->getAttrs());
+    auto newCallOp = LLVM::CallOp::create(rewriter, callOp.getLoc(),
+                                          packedResult ? TypeRange(packedResult)
+                                                       : TypeRange(),
+                                          promotedOperands, callOp->getAttrs());
     newCallOp.getProperties().setOpBundleSizes(
         rewriter.getDenseI32ArrayAttr({}));
     newCallOp.getProperties().setOperandSegmentSizes(
@@ -140,8 +149,8 @@ private:
       // Extract individual results from the structure and return them as list.
       results.reserve(numResults);
       for (unsigned i = 0; i < numResults; ++i) {
-        results.push_back(rewriter.create<LLVM::ExtractValueOp>(
-            callOp.getLoc(), newCallOp->getResult(0), i));
+        results.push_back(LLVM::ExtractValueOp::create(
+            rewriter, callOp.getLoc(), newCallOp->getResult(0), i));
       }
     }
     return results;

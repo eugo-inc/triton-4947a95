@@ -3,6 +3,7 @@
 
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -24,9 +25,26 @@ inline bool isZeroConst(Value v) {
 
 class ReduceOpHelper {
 public:
+  enum class InThreadVectorizeOpKind {
+    None,
+    AddF,
+    MulF,
+    MinNumF,
+    MaxNumF,
+    MinimumF,
+    MaximumF,
+    AddI,
+    MulI,
+    MinSI,
+    MaxSI,
+    MinUI,
+    MaxUI,
+  };
+
   explicit ReduceOpHelper(triton::ReduceOp op)
       : op(op.getOperation()), axis(op.getAxis()) {
     auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
+    srcTy = firstTy;
     srcShape = firstTy.getShape();
     srcEncoding = firstTy.getEncoding();
     srcElementTypes = op.getElementTypes();
@@ -41,43 +59,45 @@ public:
     }
   }
 
-  ArrayRef<int64_t> getSrcShape() { return srcShape; }
-
-  Attribute getSrcLayout() { return srcEncoding; }
-
-  triton::ReduceOp getOperation() { return op; }
-
-  bool isReductionOnLayoutFastAxis();
-
-  unsigned getThreadOffsetOnReductionAxis();
-
-  bool isWarpSynchronous();
-
-  unsigned getInterWarpSize();
-
-  unsigned getIntraWarpSize();
+  RankedTensorType getSrcTy() { return srcTy; }
 
   unsigned getInterWarpSizeWithUniqueData();
 
   unsigned getIntraWarpSizeWithUniqueData();
 
-  unsigned getThreadsReductionAxis();
+  bool isReduceWithinCTA();
 
-  // The shape of the shared memory space needed for the reduction.
-  SmallVector<unsigned> getScratchRepShape();
-
-  SmallVector<unsigned> getOrderWithAxisAtBeginning();
+  bool isAssociative();
 
   unsigned getScratchSizeInBytes();
 
-  bool isSupportedLayout();
+  InThreadVectorizeOpKind
+  getInThreadVectorizeOpKind(unsigned axisPack,
+                             bool supportBitwidth16Elementwise,
+                             bool supportBitwidth32Elementwise);
 
-  bool isReduceWithinCTA();
+  static triton::ColumnAction
+  moveAxisBasesToFront(const triton::LinearLayout &layout, int axis,
+                       bool isVectorized = false);
 
-  unsigned getAxis() { return axis; }
+  static triton::LinearLayout
+  zeroBasesAlongDimAndReorder(const triton::LinearLayout &layout, unsigned axis,
+                              mlir::StringAttr dim);
+
+  static triton::LinearLayout getInterLayout(const triton::LinearLayout &layout,
+                                             unsigned axis);
+
+  static triton::LinearLayout reducedRegLaneLayout(RankedTensorType srcTy,
+                                                   unsigned axis);
+
+  static Value createInThreadVectorizedCombineOp(OpBuilder &builder,
+                                                 Location loc,
+                                                 InThreadVectorizeOpKind kind,
+                                                 Value lhs, Value rhs);
 
 private:
   triton::ReduceOp op;
+  RankedTensorType srcTy;
   ArrayRef<int64_t> srcShape;
   Attribute srcEncoding;
   SmallVector<Type> srcElementTypes;
@@ -86,21 +106,7 @@ private:
 
 class ScanLoweringHelper {
 public:
-  explicit ScanLoweringHelper(triton::ScanOp op) : scanOp(op) {
-    auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
-    srcShape = firstTy.getShape();
-    srcEncoding = firstTy.getEncoding();
-    srcElementTypes = op.getElementTypes();
-
-    for (const auto &t : op.getInputTypes()) {
-      if (t.getShape() != srcShape) {
-        op.emitError() << "shape mismatch";
-      }
-      if (t.getEncoding() != srcEncoding) {
-        op.emitError() << "encoding mismatch";
-      }
-    }
-  }
+  explicit ScanLoweringHelper(triton::ScanOp op);
   // Return true if the lowering of the scan op is supported.
   bool isSupported();
   // Return the number of elements per thread along axis dim.
@@ -111,12 +117,8 @@ public:
   unsigned getNonAxisNumThreadsPerWarp();
   // Return the flat numbers of threads computing independent scan results.
   unsigned getNonAxisNumThreadsPerCTA();
-  // Return the number of warps per CTA along axis dim.
-  unsigned getAxisNumWarps();
   // Return the number of warps per CTA along axis dim with unique data.
   unsigned getAxisNumWarpsWithUniqueData();
-  // Return the number of threads per warp along axis dim.
-  unsigned getAxisNumThreadsPerWarp();
   // Return the number of threads per warp along axis dim with unique data.
   unsigned getAxisNumThreadsPerWarpWithUniqueData();
   // Return the number of blocks along axis dim.
@@ -139,18 +141,20 @@ public:
   Location getLoc() { return scanOp.getLoc(); }
   unsigned getAxis() { return scanOp.getAxis(); }
   bool getReverse() { return scanOp.getReverse(); }
-  triton::gpu::BlockedEncodingAttr getEncoding();
+  triton::gpu::LinearEncodingAttr getEncoding() { return srcEncoding; }
   llvm::ArrayRef<int64_t> getShape() { return srcShape; }
   unsigned getNumOperands() { return scanOp.getNumOperands(); }
   SmallVector<Type> getElementTypes() { return srcElementTypes; }
-  Attribute getSrcLayout() { return srcEncoding; }
+  SmallVector<unsigned> getOrder() { return order; }
   Region &getCombineOp();
 
 private:
   triton::ScanOp scanOp;
-  Attribute srcEncoding;
+  triton::gpu::LinearEncodingAttr srcEncoding;
+  Attribute legacyEncoding;
   llvm::ArrayRef<int64_t> srcShape;
   SmallVector<Type> srcElementTypes;
+  SmallVector<unsigned> order;
 };
 
 // Helper class for lowering `tt.gather` operations. This class shares lowering
@@ -166,7 +170,47 @@ public:
 
 private:
   triton::GatherOp gatherOp;
+  RankedTensorType srcTy;
+  RankedTensorType dstTy;
 };
+
+// This struct represents the factorization of a warp-local layout conversion
+// into three components: a register-only permutation, a lane-only permutation,
+// and a set of swaps between lane and register basis vectors. Algebraically, it
+// represents the factorization P = P_mixed \circ P_lane \circ P_reg. It is used
+// to aid in the implementation of the layout conversion using warp-shuffles.
+//
+// `pReg` and `pLane` are square layouts each with only one input and output
+// dimension. `mixedTranspositions` holds pairs of integers (i, j)
+// corresponding to the transposition (r_i l_j) of the i-th register basis
+// vector with the j-th lane basis vector along with 16-bit selectors for byte
+// permute instructions (where each of the four nybbles is in the range [0, 7]).
+// `nPack` gives the number of basis vectors that can be used for register
+// packing while ensuring packed elements arrive at the same destination lane.
+struct DecomposedWarpConversion {
+  struct TranspositionInfo {
+    std::pair<int, int> transposition;
+    uint16_t topPreSel = 0x3210;
+    uint16_t botPreSel = 0x7654;
+    uint16_t topPostSel = 0x3210;
+    uint16_t botPostSel = 0x7654;
+  };
+
+  triton::LinearLayout pReg, pLane;
+  SmallVector<TranspositionInfo> mixedTranspositions;
+  int nPack;
+};
+
+// Produces a decomposition of a permutation describing a warp-local layout
+// conversion as described in `DecomposedWarpConversion` above.
+//
+// This function handles cases where the numbers of register and lane basis
+// vectors differ between the two layouts. This is done by padding the smaller
+// dimension(s) with zero vectors, ensuring that the layout conversion can be
+// represented as a permutation.
+DecomposedWarpConversion
+getWarpLayoutConvertDecomposition(RankedTensorType srcTy,
+                                  RankedTensorType dstTy, int bitwidth);
 
 // Decomposes a reshape into simpler pieces.
 //
@@ -208,8 +252,7 @@ bool supportMMA(Value value, int version);
 // return nullopt). The output will be such that layout.getInDimNames() ==
 // layout.getOutDimNames() and the conversion will not include kBlock (resp.
 // kWarp or kLane) if it can be avoided
-std::optional<mlir::triton::LinearLayout>
-minimalCvtLayout(RankedTensorType srcTy, RankedTensorType dstTy);
+triton::LinearLayout minimalCvtLayout(Type srcTy, Type dstTy);
 
 // Conversion from `srcTy` to `dstTy` only involves reordering of registers.
 // There is no need for data exchange across threads, warps, or blocks.
@@ -223,38 +266,14 @@ bool cvtNeedsWarpShuffle(RankedTensorType srcTy, RankedTensorType dstTy);
 // warps, and possibly blocks.
 bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy);
 
-bool atomicNeedsSharedMemory(Value result);
-
-bool isBlockedToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy);
-
-// Return true if the src and dst layout match.
-bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
-                                   RankedTensorType dstTy);
-
-// Check if MFMA layout can be converted to the dot operand
-// layout using warp shuffle.
-bool matchMFMAAndDotOperandShuffleCase(RankedTensorType srcTy,
-                                       RankedTensorType dstTy);
-
 // TODO: Move utility functions that belong to ConvertLayoutOp to class
 // ConvertLayoutOpHelper in the future
 bool shouldUseDistSmem(Attribute srcLayout, Attribute dstLayout);
 
-/// Multi-root DAG topological sort.
-/// Performs a topological sort of the Operation in the `toSort` SetVector.
-/// Returns a topologically sorted SetVector.
-/// It is faster than mlir::topologicalSort because it prunes nodes that have
-/// been visited before.
-SetVector<Operation *>
-multiRootTopologicalSort(const SetVector<Operation *> &toSort);
-
-/// This uses the toplogicalSort above
-SetVector<Operation *>
-multiRootGetSlice(Operation *op, TransitiveFilter backwardFilter = nullptr,
-                  TransitiveFilter forwardFilter = nullptr);
-
 /// Create a basic DataFlowSolver with constant and dead code analysis included.
 std::unique_ptr<DataFlowSolver> createDataFlowSolver();
+
+namespace triton {
 
 /// This class represents a call graph for a given ModuleOp and holds
 /// data of type T associated with each FunctionOpInterface.
@@ -394,10 +413,14 @@ protected:
   FuncDataMapT funcMap;
   SmallVector<FunctionOpInterface> roots;
 };
+
+} // namespace triton
+
 // Create a basic DataFlowSolver with constant and dead code analysis included.
 std::unique_ptr<DataFlowSolver> createDataFlowSolver();
 
-triton::MakeTensorPtrOp getMakeTensorPtrOp(Value v);
+bool isCvtDimSync(const triton::LinearLayout &srcLayout,
+                  const triton::LinearLayout &dstLayout, StringAttr dim);
 
 } // namespace mlir
 

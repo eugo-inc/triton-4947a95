@@ -7,6 +7,9 @@ It is mostly documented for Triton users.
 Developers interested in exploring Triton's backend, including MLIR code transformation and LLVM code generation,
 can refer to this `section <https://github.com/triton-lang/triton?tab=readme-ov-file#tips-for-hacking>`_ to explore debugging options.
 
+For compiler-level instrumentation of floating-point computations, see
+:doc:`Floating-Point Sanitizer (FpSan) <fpsan>`.
+
 ------------------------------------
 Using Triton's Debugging Operations
 ------------------------------------
@@ -77,6 +80,6 @@ Using Third-party Tools
 For debugging on NVIDIA GPUs, `compute-sanitizer <https://docs.nvidia.com/cuda/compute-sanitizer/index.html>`_ is an effective tool for checking data races and memory access issues.
 To use it, prepend :code:`compute-sanitizer` to your command to run the Triton program.
 
-For debugging on AMD GPUs, you may want to try the LLVM `AddressSanitizer <https://rocm.docs.amd.com/en/latest/conceptual/using-gpu-sanitizer.html>`_ for ROCm.
+For debugging on AMD GPUs, you may want to try the LLVM `AddressSanitizer <https://rocm.docs.amd.com/projects/llvm-project/en/latest/conceptual/using-gpu-sanitizer.html>`_ for ROCm.
 
 For detailed visualization of memory access in Triton programs, consider using the `triton-viz <https://github.com/Deep-Learning-Profiling-Tools/triton-viz>`_ tool, which is agnostic to the underlying GPUs.
